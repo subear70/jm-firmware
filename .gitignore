@@ -1,0 +1,43 @@
+# C# / .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.rsuser
+*.pidb
+*.booproj
+*.svd
+*.ncrunchproject
+*.csproj.bak
+packages/
+*.nupkg
+
+# C / C++ (STM32 / GCC ARM)
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.a
+*.su
+*.cyclo
+*.mk
+!makefile
+!*/makefile
+
+# Build output directories
+Debug/
+Release/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
