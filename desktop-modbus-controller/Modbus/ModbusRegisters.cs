@@ -16,8 +16,9 @@ namespace DesktopModbusController.Modbus
         /// <summary>Output enable: 0 = off, 1 = on. R/W.</summary>
         public const ushort OutputEnable      = 0x0002;
 
-        /// <summary>Write any value to trigger EEPROM save of calibration data. W only.</summary>
-        public const ushort SaveCalibration   = 0x0003;
+        /// <summary>Sweep repetition rate in kHz (1–500). R/W. Applied live and
+        /// persisted to EEPROM automatically on write.</summary>
+        public const ushort SweepRateKHz      = 0x0003;
 
         /// <summary>
         /// Base address of the 20-register calibration block.
@@ -27,6 +28,12 @@ namespace DesktopModbusController.Modbus
 
         /// <summary>Total number of registers in the calibration block (10 freq/voltage pairs).</summary>
         public const ushort CalibrationCount  = 20;
+
+        /// <summary>
+        /// Persisted Modbus device address (1–247). R/W. Writing changes the
+        /// address the slave responds to and is stored to EEPROM immediately.
+        /// </summary>
+        public const ushort DeviceAddress     = 0x0018;
 
         // ── Input registers (FC04) ────────────────────────────────────────────
         /// <summary>Device status bit-flags. R only.</summary>

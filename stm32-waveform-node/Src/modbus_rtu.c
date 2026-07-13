@@ -78,18 +78,18 @@ static uint16_t crc16_calc(const uint8_t *buf, uint16_t len)
     return crc;
 }
 
-/** Assert RS485 transmit direction (DE/RE HIGH). No-op in VCP debug mode. */
+/** Assert RS485 transmit direction (DE/RE HIGH). No-op in VCP mode. */
 static inline void rs485_tx_enable(void)
 {
-#if !DEBUG_VCP_MODE
+#if !VCP_MODE
     HAL_GPIO_WritePin(RS485_DE_RE_PORT, RS485_DE_RE_PIN, GPIO_PIN_SET);
 #endif
 }
 
-/** Release RS485 bus for reception (DE/RE LOW). No-op in VCP debug mode. */
+/** Release RS485 bus for reception (DE/RE LOW). No-op in VCP mode. */
 static inline void rs485_rx_enable(void)
 {
-#if !DEBUG_VCP_MODE
+#if !VCP_MODE
     HAL_GPIO_WritePin(RS485_DE_RE_PORT, RS485_DE_RE_PIN, GPIO_PIN_RESET);
 #endif
 }
@@ -215,10 +215,10 @@ static void handle_fc06(uint8_t addr, const uint8_t *pdu, uint16_t pdu_len,
 
     if (!is_broadcast)
     {
-        /* Echo the request as response */
-        memcpy(s_tx_buf, pdu, 5U);
+        /* Echo the request as the response: addr + PDU (fc, reg addr, value) */
         s_tx_buf[0] = addr;
-        send_response(s_tx_buf, 5U);
+        memcpy(&s_tx_buf[1], pdu, 5U);
+        send_response(s_tx_buf, 6U);
     }
 }
 
@@ -287,8 +287,10 @@ void Modbus_Init(UART_HandleTypeDef *huart, TIM_HandleTypeDef *htim6)
     HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1U);
 }
 
-void Modbus_RxByteCallback(uint8_t byte)
+void Modbus_RxByteCallback(void)
 {
+    uint8_t byte = s_rx_byte;
+
     /* Restart inter-frame gap timer on every received byte */
     __HAL_TIM_SET_COUNTER(s_htim6, 0U);
     HAL_TIM_Base_Stop_IT(s_htim6);
@@ -334,7 +336,7 @@ void Modbus_Process(void)
     uint8_t is_broadcast = (device_addr == MB_BROADCAST_ADDR) ? 1U : 0U;
 
     /* Filter: accept only our address or broadcast */
-    if (!is_broadcast && device_addr != MODBUS_DEVICE_ADDRESS) return;
+    if (!is_broadcast && device_addr != MBReg_GetDeviceAddress()) return;
 
     /* Validate CRC — last two bytes are CRC (lo, hi) */
     uint16_t recv_crc = (uint16_t)(s_rx_buf[frame_len - 2U] |
@@ -346,25 +348,31 @@ void Modbus_Process(void)
 
     switch (fc)
     {
+        /* Handlers take the PDU (function code onward), i.e. the ADU minus the
+           leading address byte, so pass &s_rx_buf[1] and the matching length. */
         case MB_FC_READ_HOLDING:
             if (is_broadcast) return;  /* Reads never broadcast */
-            handle_fc03(device_addr, s_rx_buf, frame_len);
+            handle_fc03(device_addr, &s_rx_buf[1], (uint16_t)(frame_len - 1U));
             break;
         case MB_FC_READ_INPUT:
             if (is_broadcast) return;
-            handle_fc04(device_addr, s_rx_buf, frame_len);
+            handle_fc04(device_addr, &s_rx_buf[1], (uint16_t)(frame_len - 1U));
             break;
         case MB_FC_WRITE_SINGLE:
-            handle_fc06(device_addr, s_rx_buf, frame_len, is_broadcast);
+            handle_fc06(device_addr, &s_rx_buf[1], (uint16_t)(frame_len - 1U), is_broadcast);
             break;
         case MB_FC_WRITE_MULTIPLE:
-            handle_fc16(device_addr, s_rx_buf, frame_len, is_broadcast);
+            handle_fc16(device_addr, &s_rx_buf[1], (uint16_t)(frame_len - 1U), is_broadcast);
             break;
         default:
             if (!is_broadcast)
                 send_exception(device_addr, fc, MB_EX_ILLEGAL_FUNCTION);
             break;
     }
+
+    /* Persist any configuration changes made by the write handlers.  Done once
+       per frame so a bulk (FC16) write is a single Flash erase/program. */
+    MBReg_CommitIfDirty();
 }
 
 void Modbus_TxCompleteCallback(void)

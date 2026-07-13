@@ -37,19 +37,37 @@ typedef enum
 /**
  * @brief  Initialise the waveform module.
  *         Must be called once before any other Waveform_* function.
- * @param  hdac   Pointer to HAL DAC handle (DAC1)
- * @param  htim2  Pointer to HAL TIM2 handle (step timer)
+ * @param  hdac   Pointer to HAL DAC handle (DAC1, triggered by TIM2 TRGO)
+ * @param  htim2  Pointer to HAL TIM2 handle (DAC-DMA sweep trigger timer)
  */
 void Waveform_Init(DAC_HandleTypeDef *hdac, TIM_HandleTypeDef *htim2);
+
+/**
+ * @brief  Set the sweep repetition rate (full up+down cycles per second).
+ *         Reprograms the TIM2 auto-reload so the DAC-DMA streams the sample
+ *         buffer at sweep_rate * N samples/second, where N is the dynamic DAC
+ *         sample count chosen from the rate (WAVEFORM_MIN/MAX_SAMPLES).  If N
+ *         changes the ramp buffer is rebuilt and the DMA restarted.
+ *         Takes effect immediately while running.
+ * @param  sweeps_per_sec  Requested rate, clamped to
+ *         WAVEFORM_MIN_SWEEP_RATE_HZ .. WAVEFORM_MAX_SWEEP_RATE_HZ.
+ */
+void Waveform_SetSweepRate(uint32_t sweeps_per_sec);
+
+/**
+ * @brief  Return the currently configured sweep repetition rate.
+ * @return Sweep rate in Hz (full up+down cycles per second)
+ */
+uint32_t Waveform_GetSweepRate_Hz(void);
 
 /**
  * @brief  Set the frequency sweep range.
  *         Internally interpolates the required DAC voltage range from the
  *         calibration table.  Stops and restarts the sweep if running.
- * @param  min_freq_hz  Sweep start frequency in Hz (must be < max_freq_hz)
+ *         No range or ordering limits are enforced — any frequency pair is
+ *         accepted (out-of-calibration frequencies clamp to the table ends).
+ * @param  min_freq_hz  Sweep start frequency in Hz
  * @param  max_freq_hz  Sweep end   frequency in Hz
- *         Sets WAVEFORM_ERR_RANGE if min >= max or values are out of
- *         WAVEFORM_MIN_FREQ_HZ / WAVEFORM_MAX_FREQ_HZ bounds.
  */
 void Waveform_SetSweepParams(uint16_t min_freq_hz, uint16_t max_freq_hz);
 
@@ -93,11 +111,5 @@ uint16_t Waveform_GetCurrentFrequency_Hz(void);
  * @return Voltage in mV
  */
 uint16_t Waveform_GetCurrentVoltage_mV(void);
-
-/**
- * @brief  Advance the DAC by one sweep step.
- *         Call from HAL_TIM_PeriodElapsedCallback when htim == htim2.
- */
-void Waveform_TIM2_Callback(void);
 
 #endif /* WAVEFORM_H */
