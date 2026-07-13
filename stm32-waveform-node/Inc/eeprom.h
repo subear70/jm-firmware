@@ -27,26 +27,34 @@ void EEPROM_Init(void);
  * @brief  Persist waveform configuration and calibration data to EEPROM.
  * @param  min_freq_hz   Minimum sweep frequency (Hz)
  * @param  max_freq_hz   Maximum sweep frequency (Hz)
+ * @param  sweep_rate_hz Sweep repetition rate (full up+down cycles per second)
  * @param  points        Calibration point array
  * @param  num_points    Number of entries in points[] (max CALIBRATION_POINTS)
- * @return EEPROM_OK on success, EEPROM_ERR_WRITE on I2C error
+ * @param  device_addr   Modbus device address (1–247) to persist
+ * @return EEPROM_OK on success, EEPROM_ERR_WRITE on Flash erase/program error
  */
 EepromStatus_t EEPROM_SaveConfig(uint16_t                 min_freq_hz,
                                  uint16_t                 max_freq_hz,
+                                 uint32_t                 sweep_rate_hz,
                                  const CalibrationPoint_t *points,
-                                 uint8_t                  num_points);
+                                 uint8_t                  num_points,
+                                 uint8_t                  device_addr);
 
 /**
  * @brief  Restore waveform configuration and calibration data from EEPROM.
- * @param  min_freq_hz  Output: minimum sweep frequency (Hz)
- * @param  max_freq_hz  Output: maximum sweep frequency (Hz)
- * @param  points       Output: calibration array (caller provides CALIBRATION_POINTS entries)
- * @param  num_points   Output: number of valid calibration entries read
+ * @param  min_freq_hz   Output: minimum sweep frequency (Hz)
+ * @param  max_freq_hz   Output: maximum sweep frequency (Hz)
+ * @param  sweep_rate_hz Output: sweep repetition rate (Hz)
+ * @param  points        Output: calibration array (caller provides CALIBRATION_POINTS entries)
+ * @param  num_points    Output: number of valid calibration entries read
+ * @param  device_addr   Output: persisted Modbus device address (1–247)
  * @return EEPROM_OK on success, EEPROM_ERR_INVALID if no valid data found
  */
 EepromStatus_t EEPROM_LoadConfig(uint16_t          *min_freq_hz,
                                  uint16_t          *max_freq_hz,
+                                 uint32_t          *sweep_rate_hz,
                                  CalibrationPoint_t *points,
-                                 uint8_t           *num_points);
+                                 uint8_t           *num_points,
+                                 uint8_t           *device_addr);
 
 #endif /* EEPROM_H */

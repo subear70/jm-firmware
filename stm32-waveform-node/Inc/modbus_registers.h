@@ -15,9 +15,10 @@
 #define REG_MIN_FREQ_HZ          0x0000U  /* uint16, Hz, R/W */
 #define REG_MAX_FREQ_HZ          0x0001U  /* uint16, Hz, R/W */
 #define REG_OUTPUT_ENABLE        0x0002U  /* uint16, 0/1,  R/W */
-#define REG_SAVE_CALIBRATION     0x0003U  /* uint16, write triggers EEPROM save */
+#define REG_SWEEP_RATE_KHZ       0x0003U  /* uint16, sweep repetition rate in kHz, R/W (applied live, auto-persisted) */
 #define REG_CAL_BASE             0x0004U  /* 20 regs: [freq0,v0, freq1,v1, ...] */
 #define REG_CAL_END              0x0017U  /* last calibration register (inclusive) */
+#define REG_DEVICE_ADDRESS       0x0018U  /* uint16, Modbus address 1–247, R/W (persisted) */
 
 /* --------------------------------------------------------------------------
  * Input register addresses (FC04)
@@ -38,6 +39,30 @@
  * Register access callbacks — called by modbus_rtu.c dispatcher
  * Return 0 on success, or MB_EX_* on error.
  * -------------------------------------------------------------------------- */
+
+/**
+ * @brief  Initialise the register module: restore sweep params, calibration
+ *         and device address from Flash-emulated EEPROM.  Falls back to the
+ *         compile-time defaults when no valid data is stored.
+ *         Call after EEPROM_Init() and Waveform_Init().
+ */
+void MBReg_Init(void);
+
+/**
+ * @brief  Get the active Modbus device address (loaded from EEPROM or default).
+ * @return Device address in the range MODBUS_ADDR_MIN..MODBUS_ADDR_MAX
+ */
+uint8_t MBReg_GetDeviceAddress(void);
+
+/**
+ * @brief  Flush any pending configuration changes to Flash-emulated EEPROM.
+ *         Call once after a Modbus frame has been dispatched (see
+ *         Modbus_Process).  Writes that change sweep params, sweep rate or
+ *         calibration set a dirty flag; this coalesces a multi-register (FC16)
+ *         write into a single Flash erase/program cycle.  No-op when nothing
+ *         changed.
+ */
+void MBReg_CommitIfDirty(void);
 
 /**
  * @brief  Read a holding register.

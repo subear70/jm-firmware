@@ -30,17 +30,18 @@
  * @brief  Initialise the Modbus RTU slave.
  *         Arms the UART for single-byte interrupt reception.
  *         Call from USER CODE BEGIN 2 in main.c.
- * @param  huart  UART handle wired to the RS485 transceiver (USART2)
+ * @param  huart  UART handle wired to the Modbus link (USART2 ST-Link VCP /
+ *                USART1 RS485, selected via VCP_MODE in config.h)
  * @param  htim6  TIM6 handle used for the 3.5-character inter-frame gap
  */
 void Modbus_Init(UART_HandleTypeDef *huart, TIM_HandleTypeDef *htim6);
 
 /**
- * @brief  Feed one received byte into the frame buffer.
- *         Call from HAL_UART_RxCpltCallback — re-arm receive after calling.
- * @param  byte  Received byte value
+ * @brief  Read the byte received into the internal single-byte buffer, append
+ *         it to the frame buffer, and re-arm UART reception.
+ *         Call from HAL_UART_RxCpltCallback.
  */
-void Modbus_RxByteCallback(uint8_t byte);
+void Modbus_RxByteCallback(void);
 
 /**
  * @brief  Signal end of frame (3.5-character silence expired).

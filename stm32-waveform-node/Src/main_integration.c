@@ -22,8 +22,7 @@
 /* ============================================================
  * USER CODE BEGIN PV   (Private Variables)
  * ============================================================ */
-/* Single-byte buffer used to receive Modbus data via UART interrupt */
-static uint8_t s_uart_rx_byte;
+/* (Modbus owns its single-byte UART RX buffer internally.) */
 /* ============================================================ */
 
 
@@ -34,28 +33,19 @@ static uint8_t s_uart_rx_byte;
  *   UART2 RX ISR  → Modbus_RxByteCallback() → TIM6 gap timer
  *   TIM6 ISR      → Modbus_FrameTimeoutCallback()
  *   main loop     → Modbus_Process() → MBReg_WriteHolding() → Waveform_*()
- *   TIM2 ISR      → Waveform_TIM2_Callback() → DAC output
+ *   TIM2 TRGO     → DAC conversion trigger → DMA1_Stream5 → DAC output
+ *                   (hardware-driven circular sweep; no per-step ISR)
  * ============================================================ */
 
     /* Initialise modules */
-    Modbus_Init(&huart2, &htim6);
+    Modbus_Init(&huart_modbus, &htim6);
     Waveform_Init(&hdac, &htim2);
     EEPROM_Init();
 
-    /* Restore configuration from EEPROM (non-blocking; uses HAL_Delay) */
-    {
-        uint16_t           min_f = WAVEFORM_MIN_FREQ_HZ;
-        uint16_t           max_f = WAVEFORM_MAX_FREQ_HZ;
-        CalibrationPoint_t pts[CALIBRATION_POINTS];
-        uint8_t            n_pts = 0U;
-
-        if (EEPROM_LoadConfig(&min_f, &max_f, pts, &n_pts) == EEPROM_OK)
-        {
-            Waveform_SetCalibrationData(pts, n_pts);
-            Waveform_SetSweepParams(min_f, max_f);
-            /* Output stays disabled until master sends Output Enable command */
-        }
-    }
+    /* Restore sweep params, calibration and device address from the
+       Flash-emulated EEPROM. Falls back to compile-time defaults when no
+       valid data is stored. Output stays disabled until the master enables it. */
+    MBReg_Init();
 
     /* Blink onboard LED 3 times to confirm successful startup */
     for (uint8_t i = 0U; i < 3U; i++)
@@ -65,9 +55,6 @@ static uint8_t s_uart_rx_byte;
         HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
         HAL_Delay(150U);
     }
-
-    /* Arm first UART RX byte */
-    HAL_UART_Receive_IT(&huart2, &s_uart_rx_byte, 1U);
 
 /* ============================================================ */
 
@@ -87,10 +74,10 @@ static uint8_t s_uart_rx_byte;
  * ============================================================ */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART2)
+    if (huart->Instance == MODBUS_UART_INSTANCE)
     {
-        /* Feed byte into Modbus frame buffer; re-arms UART internally */
-        Modbus_RxByteCallback(s_uart_rx_byte);
+        /* Feed received byte into Modbus frame buffer; re-arms UART internally */
+        Modbus_RxByteCallback();
     }
 }
 /* ============================================================ */
@@ -101,7 +88,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
  * ============================================================ */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART2)
+    if (huart->Instance == MODBUS_UART_INSTANCE)
     {
         /* Release RS485 bus (DE/RE LOW) */
         Modbus_TxCompleteCallback();
@@ -118,8 +105,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM2)
     {
-        /* Advance waveform DAC one step */
-        Waveform_TIM2_Callback();
+        /* TIM2 update events trigger the DAC-DMA sweep in hardware;
+           no ISR work is required here. */
     }
     else if (htim->Instance == TIM6)
     {

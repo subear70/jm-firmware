@@ -7,11 +7,11 @@ namespace DesktopModbusController.Modbus
     /// Modbus RTU master — builds raw byte frames, sends them over a SerialPort,
     /// reads and validates responses.  Thread-safe via an internal lock.
     /// </summary>
-    public sealed class ModbusClient : IDisposable
+    public sealed class ModbusClient : IModbusClient
     {
         private readonly SerialPort _port;
         private readonly object     _lock = new object();
-        private const int           ReadTimeoutMs = 500;
+        private const int           ReadTimeoutMs = 2000;
 
         /// <summary>Creates a client but does not open the port.</summary>
         /// <param name="portName">COM port name, e.g. "COM3".</param>
@@ -63,7 +63,7 @@ namespace DesktopModbusController.Modbus
                 SendFrame(req);
 
                 int expectedLen = 3 + count * 2 + 2;  // addr + fc + byteCount + data + CRC
-                byte[] rsp = ReadResponse(expectedLen);
+                byte[] rsp = ReadResponse(deviceAddress, expectedLen);
                 ValidateReadResponse(rsp, deviceAddress, 0x03, expectedLen);
 
                 return ExtractRegisters(rsp, count);
@@ -81,7 +81,7 @@ namespace DesktopModbusController.Modbus
                 SendFrame(req);
 
                 int expectedLen = 3 + count * 2 + 2;
-                byte[] rsp = ReadResponse(expectedLen);
+                byte[] rsp = ReadResponse(deviceAddress, expectedLen);
                 ValidateReadResponse(rsp, deviceAddress, 0x04, expectedLen);
 
                 return ExtractRegisters(rsp, count);
@@ -105,7 +105,7 @@ namespace DesktopModbusController.Modbus
                 AppendCrc(req, 6);
                 SendFrame(req);
 
-                byte[] rsp = ReadResponse(8);
+                byte[] rsp = ReadResponse(deviceAddress, 8);
                 ValidateEchoResponse(rsp, req, deviceAddress, 0x06);
             }
         }
@@ -137,7 +137,7 @@ namespace DesktopModbusController.Modbus
                 AppendCrc(req, 7 + dataBytes);
                 SendFrame(req);
 
-                byte[] rsp = ReadResponse(8);
+                byte[] rsp = ReadResponse(deviceAddress, 8);
                 ValidateEchoResponse(rsp, req, deviceAddress, 0x10);
             }
         }
@@ -171,17 +171,46 @@ namespace DesktopModbusController.Modbus
             _port.Write(frame, 0, frame.Length);
         }
 
-        private byte[] ReadResponse(int expectedBytes)
+        private byte[] ReadResponse(byte deviceAddress, int expectedBytes)
         {
-            byte[] buf = new byte[expectedBytes];
+            // Read the 2-byte header first (address + function code) so that a
+            // short Modbus exception response (5 bytes) is not mistaken for a
+            // timeout while waiting for a full-length normal response.
+            byte[] header = ReadExact(deviceAddress, 2);
+
+            bool isException = (header[1] & 0x80) != 0;
+            int frameLen = isException ? 5 : expectedBytes;
+
+            byte[] buf = new byte[frameLen];
+            buf[0] = header[0];
+            buf[1] = header[1];
+            if (frameLen > 2)
+            {
+                byte[] rest = ReadExact(deviceAddress, frameLen - 2);
+                Array.Copy(rest, 0, buf, 2, rest.Length);
+            }
+            return buf;
+        }
+
+        private byte[] ReadExact(byte deviceAddress, int count)
+        {
+            byte[] buf = new byte[count];
             int received = 0;
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(ReadTimeoutMs);
-            while (received < expectedBytes)
+            while (received < count)
             {
                 if (DateTime.UtcNow > deadline)
-                    throw new ModbusTimeoutException(buf[0]);
-                int n = _port.Read(buf, received, expectedBytes - received);
-                received += n;
+                    throw new ModbusTimeoutException(deviceAddress);
+                try
+                {
+                    int n = _port.Read(buf, received, count - received);
+                    received += n;
+                }
+                catch (TimeoutException)
+                {
+                    // No data in this interval — keep polling until the overall
+                    // Modbus response deadline elapses, then report cleanly.
+                }
             }
             return buf;
         }
@@ -210,10 +239,36 @@ namespace DesktopModbusController.Modbus
 
         private static void CheckErrorResponse(byte[] rsp, byte addr, byte fc)
         {
-            if (rsp.Length >= 3 && rsp[1] == (fc | 0x80))
+            // A Modbus exception frame is 5 bytes: addr, fc|0x80, code, CRC-lo,
+            // CRC-hi — shorter than a normal response.  ReadResponse already
+            // detects the error bit in the header and stops after 5 bytes, so
+            // the full expected length is never awaited for an error frame.
+            if (rsp.Length >= 5 && rsp[1] == (fc | 0x80))
+            {
+                // Validate the exception frame's own CRC first, so line noise
+                // that merely sets the error bit is reported as a CRC fault
+                // rather than a spurious device exception.
+                ushort recvCrc = (ushort)(rsp[3] | (rsp[4] << 8));
+                ushort calcCrc = ModbusCrc.Compute(rsp, 0, 3);
+                if (recvCrc != calcCrc) throw new ModbusCrcException();
+
+                byte code = rsp[2];
                 throw new ModbusException(
-                    $"Device 0x{addr:X2} returned exception code 0x{rsp[2]:X2}.",
-                    rsp[2]);
+                    $"Device 0x{addr:X2} returned exception 0x{code:X2} ({DescribeException(code)}).",
+                    code);
+            }
+        }
+
+        private static string DescribeException(byte code)
+        {
+            switch (code)
+            {
+                case 0x01: return "illegal function";
+                case 0x02: return "illegal data address";
+                case 0x03: return "illegal data value";
+                case 0x04: return "slave device failure";
+                default:   return "unknown code";
+            }
         }
 
         private static ushort[] ExtractRegisters(byte[] rsp, ushort count)

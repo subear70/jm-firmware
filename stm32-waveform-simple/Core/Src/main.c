@@ -253,7 +253,7 @@ int main(void)
       {
           for(uint8_t i = 0; i < 100; i++)
           {
-              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, triangle_0p5_1v[i]);
+              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, sawtooth_0p5_1v[i]);
               microDelay(1);
           }
       }
@@ -262,7 +262,7 @@ int main(void)
       {
           for(uint8_t i = 0; i < 100; i++)
           {
-              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, triangle_1v_2v[i]);
+              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, sawtooth_1v_2v[i]);
               microDelay(1);
           }
       }
@@ -271,7 +271,7 @@ int main(void)
       {
           for(uint8_t i = 0; i < 100; i++)
           {
-              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, triangle_2v_2p5v[i]);
+              HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, sawtooth_2v_2p5v[i]);
               microDelay(1);
           }
       }
