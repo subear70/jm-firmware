@@ -1,0 +1,24 @@
+Address,Name,Value
+0x0000,Min Frequency (MHz),2900
+0x0001,Max Frequency (MHz),3900
+0x0003,Sweep Rate (kHz),10
+0x0004,Cal 1 Freq (MHz),2850
+0x0005,Cal 1 Voltage (mV),0
+0x0006,Cal 2 Freq (MHz),2964
+0x0007,Cal 2 Voltage (mV),366
+0x0008,Cal 3 Freq (MHz),3078
+0x0009,Cal 3 Voltage (mV),733
+0x000A,Cal 4 Freq (MHz),3192
+0x000B,Cal 4 Voltage (mV),1100
+0x000C,Cal 5 Freq (MHz),3306
+0x000D,Cal 5 Voltage (mV),1466
+0x000E,Cal 6 Freq (MHz),3420
+0x000F,Cal 6 Voltage (mV),1833
+0x0010,Cal 7 Freq (MHz),3534
+0x0011,Cal 7 Voltage (mV),2200
+0x0012,Cal 8 Freq (MHz),3648
+0x0013,Cal 8 Voltage (mV),2566
+0x0014,Cal 9 Freq (MHz),3762
+0x0015,Cal 9 Voltage (mV),2933
+0x0016,Cal 10 Freq (MHz),3876
+0x0017,Cal 10 Voltage (mV),3300
