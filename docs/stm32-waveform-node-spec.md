@@ -1,0 +1,362 @@
+# STM32 Waveform Node — Firmware Technical Specification
+
+## 1. Overview
+
+`stm32-waveform-node` is the firmware for a **Modbus RTU slave** that drives a
+voltage-controlled oscillator (VCO) "jammer" stage. It receives frequency-sweep
+parameters and a frequency→voltage calibration table over RS485 Modbus RTU, then
+generates a hardware-timed sawtooth **frequency sweep** by streaming DAC samples
+via DMA. All configuration (sweep range, sweep rate, calibration, and the node's
+own Modbus address) persists in Flash-emulated EEPROM across power cycles.
+
+## 2. Target hardware
+
+| Item | Detail |
+|------|--------|
+| Board | Nucleo-64 STM32F446RE |
+| MCU | STM32F446RET6 — ARM Cortex-M4F @ 180 MHz, 512 KB Flash, 128 KB SRAM |
+| Analog output | DAC1 Channel 1 → **PA4** (to VCO tuning input) |
+| RS485 (production) | Transceiver on USART1 (PA9/PA10), DE/RE on **PA1** |
+| VCP (debug) | USART2 (PA2/PA3) via onboard ST-Link |
+| Status LED | LD2 on **PA5** (3× startup blink) |
+
+### 2.1 Pin / peripheral map
+
+| Peripheral | Pins | Purpose |
+|------------|------|---------|
+| USART2 | PA2 (TX), PA3 (RX) | Modbus link in **VCP mode** (`VCP_MODE = 1`) |
+| USART1 | PA9 (TX), PA10 (RX) | Modbus link in **RS485 mode** (`VCP_MODE = 0`) |
+| GPIO PA1 | — | RS485 DE/RE direction (HIGH = transmit) |
+| DAC1 CH1 | PA4 | Analog sweep voltage output |
+| TIM2 | internal | DAC sample trigger (TRGO), sets sweep rate |
+| TIM6 | internal | Modbus 3.5-char inter-frame gap timer |
+| DMA1 Stream5 | internal | Circular DAC sample streaming |
+| GPIO PA5 | — | Onboard LED (startup indicator) |
+
+## 3. Toolchain & build
+
+| Aspect | Value |
+|--------|-------|
+| IDE | STM32CubeIDE (embeds CubeMX) |
+| HAL | STM32CubeF4 |
+| Language | C (C11) |
+| Toolchain | arm-none-eabi-gcc |
+| Linker scripts | `STM32F446RETX_FLASH.ld`, `STM32F446RETX_RAM.ld` |
+| Startup | `Startup/startup_stm32f446retx.s` |
+
+CubeMX generates the HAL skeleton (`main.c`, MSP, IRQ handlers); the hand-written
+modules plug in through the USER CODE sections documented in
+`Src/main_integration.c` (a reference document, **not** compiled verbatim).
+
+## 4. Source layout
+
+```
+stm32-waveform-node/
+├── Inc/
+│   ├── config.h              ← all compile-time constants & UART selection
+│   ├── modbus_rtu.h          ← RTU slave core API
+│   ├── modbus_registers.h    ← register addresses, status flags, callbacks
+│   ├── waveform.h            ← waveform/DAC sweep API + calibration types
+│   ├── eeprom.h              ← Flash-emulated EEPROM API
+│   └── main.h
+├── Src/
+│   ├── modbus_rtu.c          ← framing, CRC, FC dispatch, RS485 direction
+│   ├── modbus_registers.c    ← register handlers; bridges Modbus↔Waveform↔EEPROM
+│   ├── waveform.c            ← DAC-DMA sweep engine + integer interpolation
+│   ├── eeprom.c              ← Flash sector erase/program persistence
+│   ├── main_integration.c    ← reference USER CODE snippets
+│   ├── main.c                ← CubeMX-generated entry (+ USER CODE)
+│   └── … (HAL MSP, IRQ, syscalls)
+└── Drivers/                  ← STM32 HAL (auto-generated, do not edit)
+```
+
+## 5. Runtime architecture
+
+```mermaid
+flowchart TD
+    subgraph ISR["Interrupt context"]
+        RX["USART RX ISR\nModbus_RxByteCallback()"]
+        T6["TIM6 ISR\nModbus_FrameTimeoutCallback()"]
+        TX["USART TX-complete ISR\nModbus_TxCompleteCallback()"]
+    end
+    RX -->|byte + restart gap timer| BUF["s_rx_buf[]"]
+    T6 -->|3.5-char silence| RDY["s_frame_ready = 1"]
+    RDY --> PROC
+    subgraph MAIN["main loop"]
+        PROC["Modbus_Process()"]
+    end
+    PROC -->|CRC + address filter| DISP["FC dispatch"]
+    DISP --> REGW["MBReg_WriteHolding()"]
+    DISP --> REGR["MBReg_ReadHolding/Input()"]
+    REGW --> WF["Waveform_*()"]
+    REGW --> EEP["EEPROM_SaveConfig()"]
+    PROC -->|end of frame| COMMIT["MBReg_CommitIfDirty()"]
+    WF -->|TIM2 TRGO| DMA["DMA1_Stream5 → DAC1 CH1 (PA4)"]
+    TX -->|DE/RE low| BUS(("RS485 bus"))
+```
+
+### 5.1 Module responsibilities
+
+| Module | Responsibility |
+|--------|----------------|
+| `modbus_rtu` | RTU slave core: single-byte interrupt RX, inter-frame gap detection, CRC16, address/broadcast filtering, FC03/04/06/16 dispatch, exception responses, RS485 DE/RE control. |
+| `modbus_registers` | Register map: read/write callbacks, staging of values, side-effect application to the waveform module, dirty-flag persistence, device-address management. |
+| `waveform` | DAC-DMA sweep engine: builds sawtooth or triangle sample buffers, sets TIM2 rate, interpolates the calibration table, start/stop, live freq/voltage readback. |
+| `eeprom` | Flash Sector 7 emulated EEPROM: packed 52-byte block with magic, erase-then-program save, direct memory-mapped load. |
+
+## 6. Modbus RTU slave (`modbus_rtu.c`)
+
+### 6.1 Reception pipeline
+
+1. UART is armed for **single-byte** interrupt reception (`HAL_UART_Receive_IT`).
+2. Each received byte (`Modbus_RxByteCallback`) is appended to `s_rx_buf`, and
+   TIM6 (the inter-frame gap timer) is reset and restarted.
+3. When 3.5 character times of silence elapse, `Modbus_FrameTimeoutCallback`
+   marks the frame ready if ≥ 4 bytes were collected; shorter fragments are
+   discarded.
+4. The main loop calls `Modbus_Process()`, which snapshots the frame, clears the
+   ready flag, and processes it.
+
+### 6.2 Frame processing rules
+
+- **Address filter:** accept only the node's own address or broadcast (0);
+  otherwise return without responding.
+- **CRC:** last two bytes (lo, hi) are checked against a computed CRC16; a
+  mismatch silently discards the frame.
+- **Dispatch:** FC03/FC04 (reads, never broadcast), FC06/FC16 (writes, broadcast
+  allowed with no response). Unknown FC → exception `0x01`.
+- **Persistence:** after dispatch, `MBReg_CommitIfDirty()` flushes at most one
+  Flash cycle per frame.
+
+### 6.3 Function-code handlers
+
+| Handler | FC | Validation | Response |
+|---------|----|-----------|----------|
+| `handle_fc03` | 0x03 | count 1–125; per-register address check | byteCount + data |
+| `handle_fc04` | 0x04 | count 1–125; per-register address check | byteCount + data |
+| `handle_fc06` | 0x06 | pdu ≥ 5 bytes; register write side-effects | echo of request |
+| `handle_fc16` | 0x10 | count 1–123; byteCount == 2·count; length check | start + count |
+
+Broadcast writes execute the register side-effects but suppress the response.
+
+### 6.4 RS485 direction control
+
+- `rs485_tx_enable()` drives DE/RE HIGH before transmit; `rs485_rx_enable()`
+  drives it LOW after transmit completes (`Modbus_TxCompleteCallback`).
+- Both are **no-ops** in VCP mode (`VCP_MODE = 1`).
+- Transmission uses `HAL_UART_Transmit_IT`; the CRC is appended in
+  `send_response` (low byte first).
+
+## 7. Register handlers (`modbus_registers.c`)
+
+Staging variables hold the working configuration:
+`s_min_freq_hz`, `s_max_freq_hz`, `s_output_en`, `s_sweep_rate_hz`,
+`s_sweep_pause_us`, `s_triangle_enabled`, `s_device_addr`, and `s_cal_regs[20]`.
+
+### 7.1 Write side-effects
+
+| Register | On write |
+|----------|----------|
+| `0x0000` Min Freq | Update staging, re-apply sweep params, mark persist dirty. No range check. |
+| `0x0001` Max Freq | Update staging, re-apply sweep params, mark persist dirty. No range check. |
+| `0x0002` Output Enable | Start (`Waveform_Start`) or stop (`Waveform_Stop`) immediately. Not persisted. |
+| `0x0003` Sweep Rate (kHz) | Convert kHz→Hz; reject out-of-range (`1–500 kHz` → `1k–500k Hz`) with exception `0x03`; apply live; mark persist dirty. |
+| `0x0004`–`0x0017` Calibration | Stage value; mark cal + persist dirty (applied at end of frame). |
+| `0x0018` Device Address | Range-check 1–247 (else `0x03`); update address; **persist immediately**. |
+| `0x0019` Sweep Pause | Accept 0–10,000 us (else `0x03`); return to and hold the calibrated low DAC endpoint between sweeps; persist at end of frame. |
+| `0x001A` Triangle Mode | Accept 0 or 1 (else `0x03`); rebuild DMA live for sawtooth or triangle output; persist at end of frame. |
+
+### 7.2 End-of-frame commit
+
+`MBReg_CommitIfDirty()`:
+
+1. If calibration changed: convert staging to `CalibrationPoint_t[10]`, push to
+   the waveform module (`Waveform_SetCalibrationData`), and re-apply the sweep so
+   new voltages take effect.
+2. If any persistent value changed: write the whole block to EEPROM once.
+
+This coalescing means a bulk FC16 write of the full config + calibration is a
+single Flash sector erase/program.
+
+### 7.3 Boot restore (`MBReg_Init`)
+
+- Loads config from EEPROM. On invalid/missing data (first boot, erased sector,
+  corrupt magic, torn write), it seeds a **linear default calibration**
+  (freq `1..10 Hz`, voltage `0..DAC full-scale` across 10 points), applies it,
+  sets the default sweep rate, and persists — so subsequent boots find a valid
+  block.
+- Guards a corrupt stored device address (→ default 1) and sweep rate
+  (→ default 10 kHz-equivalent).
+- **Output stays disabled** on boot until the master writes Output Enable.
+
+### 7.4 Input-register mapping
+
+| Input reg | Source |
+|-----------|--------|
+| `0x0000` Status | `Waveform_GetStatus()` translated to status bit flags |
+| `0x0001` Current Freq | `Waveform_GetCurrentFrequency_Hz()` |
+| `0x0002` Current Voltage | `Waveform_GetCurrentVoltage_mV()` |
+
+## 8. Waveform engine (`waveform.c`)
+
+### 8.1 Concept
+
+The node outputs either a **sawtooth** or **triangle frequency sweep**, selected
+by holding register `0x001A`. Both modes use calibrated DAC points; triangle mode
+mirrors the ramp back down to the minimum before any configured pause. A
+precomputed DAC sample buffer is streamed by **circular DMA**.
+
+```mermaid
+flowchart LR
+    RATE["Sweep rate (Hz)"] --> N["N = clamp(1MHz / rate, 2..100)"]
+    N --> BUILD["build_dac_buffer()\nlinear freq ramp → cal interp → DAC codes"]
+    BUILD --> ARR["TIM2 ARR = 90MHz / (rate·N) - 1"]
+    ARR --> DMA["Circular DMA @ rate·N samples/s"]
+    DMA --> OUT["DAC1 CH1 → PA4"]
+```
+
+### 8.2 Dynamic sample count
+
+To keep the DAC update rate ≤ `DAC_MAX_SAMPLE_RATE_HZ` (~1 MSPS) while spanning
+a wide sweep-rate range:
+
+```
+N = clamp(DAC_MAX_SAMPLE_RATE_HZ / sweep_rate, WAVEFORM_MIN_SAMPLES, WAVEFORM_MAX_SAMPLES)
+  = clamp(1_000_000 / rate, 2, 100)
+```
+
+Low rates use up to 100 samples (fine ramp); high rates use as few as 2 (coarse)
+so the same DAC reaches sweep rates up to `WAVEFORM_MAX_SWEEP_RATE_HZ` (500 000
+sweeps/s). The DMA buffer `s_dac_buffer[100]` is statically sized to
+`WAVEFORM_MAX_SAMPLES`.
+
+### 8.3 Timing
+
+TIM2 runs at the 90 MHz kernel clock (prescaler 0) and issues a TRGO update event
+per DAC sample:
+
+```
+f_sample   = TIM2_CLK_HZ / (ARR + 1)
+sweep_rate = f_sample / N
+=> ARR      = TIM2_CLK_HZ / (sweep_rate · N) − 1        (TIM2_CLK_HZ = 90 MHz)
+```
+
+`Waveform_SetSweepRate` recomputes N and ARR live. If N changes while running, it
+halts TIM2, stops the DAC-DMA, rebuilds the buffer, clears the underrun flag, and
+restarts the stream (safe start-last ordering) to avoid a DMA-underrun latch.
+
+### 8.4 Interpolation (integer-only, no FP)
+
+- `interp_voltage_scaled(freq_num, denom)` interpolates DAC voltage in a **scaled
+  fractional-frequency domain** so a narrow (few-Hz) sweep still yields a distinct
+  value at every sample instead of collapsing to a few integer-Hz steps. Uses
+  64-bit intermediates; clamps to table endpoints; result clamped to 0–65535.
+- `interp_freq(voltage_mv)` reverse-interpolates the live frequency from the
+  current DAC voltage (assumes monotonically increasing voltages).
+- `mv_to_dac` / `dac_to_mv` convert between millivolts and 12-bit DAC codes using
+  `DAC_FULL_SCALE_MV = 3300` and `DAC_RESOLUTION = 4095`.
+
+### 8.5 DMA underrun hardening
+
+`dac_dma_silence_irq()` disables the DAC DMA-underrun IRQ and the DMA half/complete
+transfer interrupts. This prevents:
+
+- CPU saturation from HT/TC interrupts firing every DMA cycle at MHz rates, and
+- HAL's underrun handler (shared on the TIM6_DAC IRQ) from permanently killing the
+  sweep on a momentary underrun.
+
+A stray underrun merely repeats a sample instead of freezing the firmware.
+
+### 8.6 Start / stop
+
+- `Waveform_Start()` refuses to run with any error flag set or no calibration;
+  configures the DAC channel for TIM2 TRGO triggering, programs the rate, starts
+  circular DMA, silences the DMA IRQs, then starts TIM2.
+- `Waveform_Stop()` halts TIM2 and DMA, switches the DAC to software trigger, and
+  drives the output to **0 V**.
+
+### 8.7 Status flags
+
+`WaveformStatus_t`: `WAVEFORM_STOPPED`, `WAVEFORM_RUNNING`, `WAVEFORM_ERR_RANGE`
+(reserved — no range validation is currently enforced), `WAVEFORM_ERR_CAL`.
+
+## 9. Persistence (`eeprom.c`)
+
+### 9.1 Storage
+
+- Uses internal Flash **Sector 7** (128 KB @ `0x08060000`) as emulated EEPROM.
+- Strategy: **erase sector, then program word-by-word**. Writes are coalesced to
+  one save per Modbus frame that changes persistent configuration.
+
+### 9.2 Stored block (packed, 55 bytes; padded to 56 for Flash programming)
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 2 | `magic` = `0xAB13` |
+| 2 | 2 | `min_freq_hz` |
+| 4 | 2 | `max_freq_hz` |
+| 6 | 1 | `num_cal_points` |
+| 7 | 1 | `device_addr` (1–247) |
+| 8 | 4 | `sweep_rate_hz` |
+| 12 | 40 | `cal_points[10]` (each 4 B: freq uint16 + voltage uint16) |
+| 52 | 2 | `pause_us` (inter-sweep pause; absent in older blocks means 0) |
+| 54 | 1 | `triangle` (0=sawtooth, 1=triangle; absent/invalid in older blocks means 0) |
+
+The packed block is 55 bytes and is rounded to 56 bytes for Flash word
+programming. Triangle mode uses at least three active samples and caps the
+active sweep rate at 333 kHz to respect the 1 MSPS DAC limit.
+
+`EEPROM_LoadConfig` reads the memory-mapped block directly and returns
+`EEPROM_ERR_INVALID` when the magic number does not match — the trigger for the
+default-seeding path in `MBReg_Init`.
+
+## 10. Compile-time configuration (`config.h`)
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `MODBUS_DEVICE_ADDRESS` | 1 | First-boot Modbus address (1–247) |
+| `MODBUS_BAUD_RATE` | 115200 | UART baud |
+| `WAVEFORM_MIN_FREQ_HZ` / `MAX` | 1 / 1000 | VCO tuning-range limits (Hz) |
+| `WAVEFORM_DEFAULT_MIN/MAX_FREQ_HZ` | 1 / 10 | First-boot sweep range |
+| `WAVEFORM_MIN/MAX_SAMPLES` | 2 / 100 | DAC samples per ramp (also DMA buffer size) |
+| `WAVEFORM_MIN/MAX_SWEEP_RATE_HZ` | 1 / 500000 | Sweep repetition-rate limits |
+| `WAVEFORM_DEFAULT_SWEEP_RATE_HZ` | 10000 | First-boot sweep rate |
+| `CALIBRATION_POINTS` | 10 | Freq/voltage pairs |
+| `DAC_FULL_SCALE_MV` / `DAC_RESOLUTION` | 3300 / 4095 | DAC scaling (12-bit) |
+| `DAC_MAX_SAMPLE_RATE_HZ` | 1000000 | DAC update ceiling (~1 MSPS) |
+| `TIM2_CLK_HZ` | 90 MHz | TIM2 kernel clock |
+| `TIM6_PRESCALER` / `TIM6_PERIOD` | 89 / 499 | 500 µs inter-frame timeout |
+| `EEPROM_FLASH_SECTOR` / `ADDR` / `MAGIC` | Sector 7 / `0x08060000` / `0xAB13` | EEPROM location |
+| `VCP_MODE` | 1 | 1 = USART2 VCP (debug); 0 = USART1 RS485 (production) |
+| `RS485_DE_RE_PIN` | PA1 | Direction control |
+| `LED_PIN` | PA5 | Startup LED |
+
+## 11. Startup sequence
+
+1. HAL / clock init (SYSCLK 180 MHz, APB1 45 MHz → TIM2/TIM6 90 MHz).
+2. `Modbus_Init(&huart, &htim6)` — arm single-byte RX.
+3. `Waveform_Init(&hdac, &htim2)`.
+4. `EEPROM_Init()`.
+5. `MBReg_Init()` — restore config or seed defaults; output disabled.
+6. Blink LD2 three times (startup confirmation).
+7. Enter main loop calling `Modbus_Process()` each iteration.
+
+## 12. Concurrency & safety notes
+
+- Only single-byte UART RX runs in ISR context; frame parsing and all
+  side-effects run in the main loop, avoiding races on the register/waveform
+  state.
+- Frame buffer overflow (> `MB_MAX_FRAME_SIZE`) resets the receiver.
+- All interpolation and scaling use bounded integer arithmetic (with 64-bit
+  intermediates where needed) — no floating point, no dynamic allocation.
+- Flash writes are infrequent and coalesced to one erase/program per frame.
+
+## 13. Known behaviors / caveats
+
+- Min/Max frequency are **not** range- or order-validated in firmware; the
+  `WAVEFORM_ERR_RANGE` flag is defined but never set by the current code.
+- The desktop UI labels frequency registers "MHz" while the firmware treats them
+  as Hz internally — the raw uint16 value is what is transported. See the
+  [protocol spec](modbus-protocol-spec.md#41-holding-registers--fc03-read--fc06-fc16-write).
+- Device-address changes persist immediately but the response is sent from the
+  old address; the master must retarget the new address afterward.

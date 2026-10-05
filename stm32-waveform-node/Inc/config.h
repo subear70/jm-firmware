@@ -48,11 +48,16 @@
 #define WAVEFORM_MAX_SAMPLES     ((uint16_t)100U)   /* finest ramp / DMA buf size */
 
 /* --------------------------------------------------------------------------
- * Waveform sweep-repetition-rate limits (full up+down cycles per second)
+ * Active waveform sweep-ramp rate limits (excluding inter-sweep pause)
  * -------------------------------------------------------------------------- */
 #define WAVEFORM_MIN_SWEEP_RATE_HZ     ((uint32_t)1U)
 #define WAVEFORM_MAX_SWEEP_RATE_HZ     ((uint32_t)500000U)   /* 500 k sweeps/s (DAC_MAX_SAMPLE_RATE_HZ / WAVEFORM_MIN_SAMPLES) */
 #define WAVEFORM_DEFAULT_SWEEP_RATE_HZ ((uint32_t)10000U)    /* 10 k sweeps/s */
+
+/* Maximum configurable hold time between sweeps.  At the 1 MSPS DAC limit,
+ * this reserves at most 10,000 additional half-word samples (20 KB) in DMA. */
+#define WAVEFORM_MAX_PAUSE_US          10000U
+#define WAVEFORM_MAX_PAUSE_SAMPLES     WAVEFORM_MAX_PAUSE_US
 
 /* --------------------------------------------------------------------------
  * Calibration
@@ -65,6 +70,9 @@
 #define DAC_FULL_SCALE_MV        ((uint16_t)3300U)   /* mV at DAC output = 4095 */
 #define DAC_RESOLUTION           ((uint16_t)4095U)   /* 12-bit */
 #define DAC_MAX_SAMPLE_RATE_HZ   ((uint32_t)1000000U) /* ~1 MSPS DAC update ceiling */
+#define WAVEFORM_MIN_TRIANGLE_SAMPLES ((uint16_t)3U)
+#define WAVEFORM_MAX_TRIANGLE_SWEEP_RATE_HZ \
+  ((uint32_t)(DAC_MAX_SAMPLE_RATE_HZ / WAVEFORM_MIN_TRIANGLE_SAMPLES))
 
 /* --------------------------------------------------------------------------
  * TIM2 — DAC sweep trigger timer (drives DAC-DMA, one sample per update event)
@@ -88,7 +96,7 @@
 #define TIM2_CLK_HZ              ((uint32_t)90000000U)
 #define TIM2_PRESCALER           ((uint32_t)0U)
 
-/* ARR for a given sweep repetition rate and active DAC sample count N. */
+/* ARR for a given active ramp rate and DAC sample count N. */
 #define WAVEFORM_TIM2_ARR(rate, samples)  \
     ((uint32_t)(TIM2_CLK_HZ / ((uint32_t)(rate) * (uint32_t)(samples))) - 1U)
 
@@ -113,7 +121,7 @@
 /* --------------------------------------------------------------------------
  * EEPROM — emulated in internal Flash (STM32F446RE Sector 7)
  * Sector 7: 128 KB starting at 0x08060000
- * Erase-before-write; writes are infrequent (only on calibration save).
+ * Erase-before-write; persistent setting changes are coalesced per Modbus frame.
  * -------------------------------------------------------------------------- */
 #define EEPROM_FLASH_SECTOR      FLASH_SECTOR_7
 #define EEPROM_FLASH_ADDR        ((uint32_t)0x08060000U)

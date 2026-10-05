@@ -2,7 +2,7 @@
  * waveform.c
  * Purpose:      VCO frequency-sweep module — precomputes a full up+down DAC
  *               ramp buffer and streams it to DAC1 by circular DMA, triggered
- *               by TIM2 TRGO.  The sweep repetition rate (up to
+ *               by TIM2 TRGO.  The active sweep-ramp rate (up to
  *               WAVEFORM_MAX_SWEEP_RATE_HZ) is set by the TIM2 auto-reload.
  * Dependencies: waveform.h, config.h
  */
@@ -24,20 +24,22 @@ static volatile uint8_t   s_num_cal_points = 0U;
 static volatile uint16_t s_min_freq_hz  = 0U;
 static volatile uint16_t s_max_freq_hz  = 0U;
 
-/* Sweep repetition rate (full up+down cycles per second) */
+/* Active sweep-ramp rate; the configured pause extends each complete cycle. */
 static volatile uint32_t s_sweep_rate_hz = WAVEFORM_DEFAULT_SWEEP_RATE_HZ;
+static volatile uint16_t s_pause_us = 0U;
+static volatile uint8_t s_triangle_enabled = 0U;
 
 /* DAC sample buffer streamed by DMA in circular mode.
- * A sawtooth: [0 .. s_active_samples-1] is a single rising ramp; the circular
- * DMA wrap-around from the last sample back to the first produces the instant
- * flyback to the start voltage.  Sized to WAVEFORM_MAX_SAMPLES; only the first
- * s_active_samples entries are streamed.
+ * [0 .. s_active_samples-1] is a single rising ramp; appended pause samples hold
+ * the calibrated low endpoint. The ramp flies back there before the pause.
  * 12-bit right-aligned DAC codes; DMA is configured for half-word transfers. */
-static uint16_t          s_dac_buffer[WAVEFORM_MAX_SAMPLES];
+static uint16_t          s_dac_buffer[WAVEFORM_MAX_SAMPLES + WAVEFORM_MAX_PAUSE_SAMPLES];
 
 /* Active number of DAC samples in the current sweep ramp — recomputed from the
  * sweep rate so the DAC update rate stays <= DAC_MAX_SAMPLE_RATE_HZ. */
 static volatile uint16_t s_active_samples = WAVEFORM_MIN_SAMPLES;
+static volatile uint16_t s_pause_samples = 0U;
+static volatile uint16_t s_dma_samples = WAVEFORM_MIN_SAMPLES;
 
 /* --------------------------------------------------------------------------
  * Internal — integer linear interpolation helpers
@@ -137,7 +139,28 @@ static uint16_t compute_active_samples(uint32_t rate_hz)
     uint32_t n = DAC_MAX_SAMPLE_RATE_HZ / rate_hz;
     if (n > (uint32_t)WAVEFORM_MAX_SAMPLES) n = (uint32_t)WAVEFORM_MAX_SAMPLES;
     if (n < (uint32_t)WAVEFORM_MIN_SAMPLES) n = (uint32_t)WAVEFORM_MIN_SAMPLES;
+    if (s_triangle_enabled && n < (uint32_t)WAVEFORM_MIN_TRIANGLE_SAMPLES)
+        n = (uint32_t)WAVEFORM_MIN_TRIANGLE_SAMPLES;
     return (uint16_t)n;
+}
+
+/** Convert the requested pause to held DAC samples at the current sample rate. */
+static uint16_t compute_pause_samples(uint32_t rate_hz,
+                                      uint16_t active_samples,
+                                      uint16_t pause_us)
+{
+    if (rate_hz == 0U || active_samples == 0U || pause_us == 0U)
+        return 0U;
+
+    uint32_t arr = WAVEFORM_TIM2_ARR(rate_hz, active_samples);
+    if (arr < 1U) arr = 1U;
+
+    uint64_t numerator = (uint64_t)pause_us * (uint64_t)TIM2_CLK_HZ;
+    uint64_t denominator = 1000000ULL * ((uint64_t)arr + 1ULL);
+    uint64_t samples = (numerator + denominator - 1ULL) / denominator;
+    if (samples > WAVEFORM_MAX_PAUSE_SAMPLES)
+        samples = WAVEFORM_MAX_PAUSE_SAMPLES;
+    return (uint16_t)samples;
 }
 
 /** Convert a voltage in mV to a 12-bit right-aligned DAC code. */
@@ -159,14 +182,15 @@ static uint16_t dac_to_mv(uint16_t dac_code)
 }
 
 /**
- * @brief  Precompute the sawtooth DAC sample buffer streamed by DMA.
- *         Steps linearly in FREQUENCY from min_freq_hz to max_freq_hz across
- *         s_active_samples points, mapping each frequency to its DAC voltage
+ * @brief  Precompute the selected waveform sample buffer streamed by DMA.
+ *         Sawtooth mode rises from min_freq_hz to max_freq_hz; triangle mode
+ *         rises and falls across s_active_samples points. Each frequency maps
+ *         to its DAC voltage
  *         through the calibration table (interp_voltage_scaled).  The frequency
  *         is kept as a scaled fraction so the swept frequency is linear and every
  *         sample is distinct even over a narrow (few-Hz) sweep range.
- *         A single rising ramp fills [0 .. s_active_samples-1]; the circular
- *         DMA wrap-around back to index 0 produces the instant flyback.
+ *         A single rising ramp fills [0 .. s_active_samples-1]; pause points
+ *         hold the calibrated low endpoint before the next ramp starts.
  */
 static void build_dac_buffer(void)
 {
@@ -179,12 +203,28 @@ static void build_dac_buffer(void)
 
     for (uint16_t i = 0U; i < n; i++)
     {
-        /* Fractional frequency at this step kept as freq_num/denom (no integer
-         * truncation): freq = f_start + f_span * i / (n - 1). */
-        int32_t freq_num = f_start * denom + f_span * (int32_t)i;
+        int32_t position_num = (int32_t)i;
+        if (s_triangle_enabled && n > 2U)
+        {
+            uint16_t peak_left = (uint16_t)(denom / 2);
+            uint16_t peak_right = (uint16_t)((denom + 1) / 2);
+            if (i < peak_left)
+                position_num = ((int32_t)i * denom) / peak_left;
+            else if (i <= peak_right)
+                position_num = denom;
+            else
+                position_num = ((int32_t)(n - 1U - i) * denom) /
+                               (int32_t)(denom - peak_right);
+        }
+
+        /* Keep frequency in a scaled fractional domain for calibration. */
+        int32_t freq_num = f_start * denom + f_span * position_num;
         if (freq_num < 0) freq_num = 0;
         s_dac_buffer[i] = mv_to_dac(interp_voltage_scaled(freq_num, denom));
     }
+
+    for (uint16_t i = 0U; i < s_pause_samples; i++)
+        s_dac_buffer[n + i] = s_dac_buffer[0];
 }
 
 /**
@@ -227,6 +267,22 @@ static void dac_dma_silence_irq(void)
         __HAL_DMA_DISABLE_IT(s_hdac->DMA_Handle1, DMA_IT_HT | DMA_IT_TC);
 }
 
+static void restart_dma_stream(void)
+{
+    if (!(s_status & WAVEFORM_RUNNING)) return;
+
+    build_dac_buffer();
+    HAL_TIM_Base_Stop(s_htim2);
+    HAL_DAC_Stop_DMA(s_hdac, DAC_CHANNEL_1);
+    apply_timer_rate();
+    __HAL_DAC_CLEAR_FLAG(s_hdac, DAC_FLAG_DMAUDR1);
+    (void)HAL_DAC_Start_DMA(s_hdac, DAC_CHANNEL_1,
+                            (uint32_t *)s_dac_buffer, s_dma_samples,
+                            DAC_ALIGN_12B_R);
+    dac_dma_silence_irq();
+    HAL_TIM_Base_Start(s_htim2);
+}
+
 /* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
@@ -238,7 +294,11 @@ void Waveform_Init(DAC_HandleTypeDef *hdac, TIM_HandleTypeDef *htim2)
     s_status         = WAVEFORM_STOPPED;
     s_num_cal_points = 0U;
     s_sweep_rate_hz  = WAVEFORM_DEFAULT_SWEEP_RATE_HZ;
+    s_pause_us       = 0U;
+    s_triangle_enabled = 0U;
     s_active_samples = compute_active_samples(WAVEFORM_DEFAULT_SWEEP_RATE_HZ);
+    s_pause_samples  = 0U;
+    s_dma_samples    = s_active_samples;
     memset(s_dac_buffer, 0, sizeof(s_dac_buffer));
 }
 
@@ -271,19 +331,25 @@ void Waveform_SetCalibrationData(const CalibrationPoint_t *points,
 
 void Waveform_SetSweepRate(uint32_t sweeps_per_sec)
 {
+    uint32_t max_sweep_rate = s_triangle_enabled
+        ? WAVEFORM_MAX_TRIANGLE_SWEEP_RATE_HZ
+        : WAVEFORM_MAX_SWEEP_RATE_HZ;
     if (sweeps_per_sec < WAVEFORM_MIN_SWEEP_RATE_HZ)
         sweeps_per_sec = WAVEFORM_MIN_SWEEP_RATE_HZ;
-    else if (sweeps_per_sec > WAVEFORM_MAX_SWEEP_RATE_HZ)
-        sweeps_per_sec = WAVEFORM_MAX_SWEEP_RATE_HZ;
+    else if (sweeps_per_sec > max_sweep_rate)
+        sweeps_per_sec = max_sweep_rate;
 
     s_sweep_rate_hz = sweeps_per_sec;
 
     uint16_t new_samples = compute_active_samples(s_sweep_rate_hz);
+    uint16_t new_pause_samples = compute_pause_samples(s_sweep_rate_hz,
+                                                       new_samples,
+                                                       s_pause_us);
 
     /* Apply live if a sweep is currently running */
     if (s_status & WAVEFORM_RUNNING)
     {
-        if (new_samples != s_active_samples)
+        if (new_samples != s_active_samples || new_pause_samples != s_pause_samples)
         {
             /* Sample count changed: rebuild the ramp and restart the circular
              * DMA with the new transfer length.  Halt TIM2 first so no TRGO /
@@ -292,6 +358,8 @@ void Waveform_SetSweepRate(uint32_t sweeps_per_sec)
              * the underrun IRQ, which HAL services by killing the stream.
              * Mirrors the safe start-last ordering in Waveform_Start(). */
             s_active_samples = new_samples;
+            s_pause_samples = new_pause_samples;
+            s_dma_samples = (uint16_t)(s_active_samples + s_pause_samples);
             build_dac_buffer();
 
             HAL_TIM_Base_Stop(s_htim2);
@@ -299,7 +367,7 @@ void Waveform_SetSweepRate(uint32_t sweeps_per_sec)
             apply_timer_rate();
             __HAL_DAC_CLEAR_FLAG(s_hdac, DAC_FLAG_DMAUDR1);
             (void)HAL_DAC_Start_DMA(s_hdac, DAC_CHANNEL_1,
-                                    (uint32_t *)s_dac_buffer, s_active_samples,
+                                    (uint32_t *)s_dac_buffer, s_dma_samples,
                                     DAC_ALIGN_12B_R);
             dac_dma_silence_irq();
             HAL_TIM_Base_Start(s_htim2);
@@ -312,12 +380,52 @@ void Waveform_SetSweepRate(uint32_t sweeps_per_sec)
     else
     {
         s_active_samples = new_samples;
+        s_pause_samples = new_pause_samples;
+        s_dma_samples = (uint16_t)(s_active_samples + s_pause_samples);
     }
 }
 
 uint32_t Waveform_GetSweepRate_Hz(void)
 {
     return s_sweep_rate_hz;
+}
+
+void Waveform_SetPauseUs(uint16_t pause_us)
+{
+    if (pause_us > WAVEFORM_MAX_PAUSE_US)
+        pause_us = WAVEFORM_MAX_PAUSE_US;
+
+    s_pause_us = pause_us;
+    s_pause_samples = compute_pause_samples(s_sweep_rate_hz,
+                                            s_active_samples,
+                                            s_pause_us);
+    s_dma_samples = (uint16_t)(s_active_samples + s_pause_samples);
+
+    restart_dma_stream();
+}
+
+uint16_t Waveform_GetPauseUs(void)
+{
+    return s_pause_us;
+}
+
+void Waveform_SetTriangleEnabled(uint8_t enabled)
+{
+    uint8_t triangle_enabled = (enabled != 0U) ? 1U : 0U;
+    if (triangle_enabled == s_triangle_enabled) return;
+
+    s_triangle_enabled = triangle_enabled;
+    uint32_t max_sweep_rate = triangle_enabled
+        ? WAVEFORM_MAX_TRIANGLE_SWEEP_RATE_HZ
+        : WAVEFORM_MAX_SWEEP_RATE_HZ;
+    if (s_sweep_rate_hz > max_sweep_rate)
+        s_sweep_rate_hz = max_sweep_rate;
+    s_active_samples = compute_active_samples(s_sweep_rate_hz);
+    s_pause_samples = compute_pause_samples(s_sweep_rate_hz,
+                                            s_active_samples,
+                                            s_pause_us);
+    s_dma_samples = (uint16_t)(s_active_samples + s_pause_samples);
+    restart_dma_stream();
 }
 
 void Waveform_Start(void)
@@ -332,6 +440,10 @@ void Waveform_Start(void)
 
     /* Choose the sample count for the current rate, then precompute the ramp */
     s_active_samples = compute_active_samples(s_sweep_rate_hz);
+    s_pause_samples = compute_pause_samples(s_sweep_rate_hz,
+                                             s_active_samples,
+                                             s_pause_us);
+    s_dma_samples = (uint16_t)(s_active_samples + s_pause_samples);
     build_dac_buffer();
 
     /* Route the DAC conversion trigger to TIM2 TRGO for DMA streaming */
@@ -345,7 +457,7 @@ void Waveform_Start(void)
     apply_timer_rate();
 
     if (HAL_DAC_Start_DMA(s_hdac, DAC_CHANNEL_1,
-                          (uint32_t *)s_dac_buffer, s_active_samples,
+                          (uint32_t *)s_dac_buffer, s_dma_samples,
                           DAC_ALIGN_12B_R) != HAL_OK)
     {
         return;
@@ -389,7 +501,7 @@ uint16_t Waveform_GetCurrentVoltage_mV(void)
 
     /* Derive the sample currently being output from the DMA transfer counter.
      * NDTR counts down from s_active_samples to 1. */
-    uint16_t n = s_active_samples;
+    uint16_t n = s_dma_samples;
     uint32_t remaining = __HAL_DMA_GET_COUNTER(s_hdac->DMA_Handle1);
     uint16_t index = 0U;
     if (remaining > 0U && remaining <= n)

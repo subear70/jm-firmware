@@ -22,10 +22,12 @@ static uint16_t s_min_freq_hz  = WAVEFORM_DEFAULT_MIN_FREQ_HZ;
 static uint16_t s_max_freq_hz  = WAVEFORM_DEFAULT_MAX_FREQ_HZ;
 static uint16_t s_output_en    = 0U;
 
-/* Sweep repetition rate (full up+down cycles per second), stored internally in
+/* Active sweep-ramp rate (excluding the inter-sweep pause), stored internally in
  * Hz.  Configured via REG_SWEEP_RATE_KHZ (0x0003) in kHz units; applied live,
  * persisted to EEPROM automatically, and restored on boot by MBReg_Init(). */
 static uint32_t s_sweep_rate_hz = WAVEFORM_DEFAULT_SWEEP_RATE_HZ;
+static uint16_t s_sweep_pause_us = 0U;
+static uint8_t s_triangle_enabled = 0U;
 
 /* Active Modbus device address (restored from EEPROM by MBReg_Init) */
 static uint8_t  s_device_addr  = MODBUS_DEVICE_ADDRESS;
@@ -78,6 +80,8 @@ static EepromStatus_t persist_config(void)
         pts[i].voltage_mv = s_cal_regs[i * 2U + 1U];
     }
     return EEPROM_SaveConfig(s_min_freq_hz, s_max_freq_hz, s_sweep_rate_hz,
+                             s_sweep_pause_us,
+                             s_triangle_enabled,
                              pts, CALIBRATION_POINTS, s_device_addr);
 }
 
@@ -109,11 +113,14 @@ void MBReg_Init(void)
     uint16_t           min_f    = WAVEFORM_DEFAULT_MIN_FREQ_HZ;
     uint16_t           max_f    = WAVEFORM_DEFAULT_MAX_FREQ_HZ;
     uint32_t           rate     = WAVEFORM_DEFAULT_SWEEP_RATE_HZ;
+    uint16_t           pause_us = 0U;
+    uint8_t            triangle = 0U;
     CalibrationPoint_t pts[CALIBRATION_POINTS];
     uint8_t            n_pts    = 0U;
     uint8_t            dev_addr = MODBUS_DEVICE_ADDRESS;
 
-    if (EEPROM_LoadConfig(&min_f, &max_f, &rate, pts, &n_pts, &dev_addr) != EEPROM_OK)
+    if (EEPROM_LoadConfig(&min_f, &max_f, &rate, &pause_us, &triangle,
+                          pts, &n_pts, &dev_addr) != EEPROM_OK)
     {
         /* No valid data — first boot, erased sector, corrupt magic, or a
            torn write.  Seed a sensible default configuration: a linear
@@ -123,6 +130,8 @@ void MBReg_Init(void)
         load_default_calibration();
         apply_calibration();               /* pushes calibration + sweep params */
         Waveform_SetSweepRate(s_sweep_rate_hz);
+        Waveform_SetPauseUs(s_sweep_pause_us);
+        Waveform_SetTriangleEnabled(s_triangle_enabled);
         (void)persist_config();
         return;
     }
@@ -134,11 +143,17 @@ void MBReg_Init(void)
     /* Guard against a corrupt/out-of-range stored sweep rate */
     if (rate < WAVEFORM_MIN_SWEEP_RATE_HZ || rate > WAVEFORM_MAX_SWEEP_RATE_HZ)
         rate = WAVEFORM_DEFAULT_SWEEP_RATE_HZ;
+    if (pause_us > WAVEFORM_MAX_PAUSE_US)
+        pause_us = 0U;
+    if (triangle > 1U)
+        triangle = 0U;
 
     s_device_addr   = dev_addr;
     s_min_freq_hz   = min_f;
     s_max_freq_hz   = max_f;
     s_sweep_rate_hz = rate;
+    s_sweep_pause_us = pause_us;
+    s_triangle_enabled = triangle;
 
     for (uint8_t i = 0U; (i < n_pts) && (i < CALIBRATION_POINTS); i++)
     {
@@ -148,7 +163,10 @@ void MBReg_Init(void)
 
     Waveform_SetCalibrationData(pts, n_pts);
     Waveform_SetSweepParams(min_f, max_f);
+    Waveform_SetTriangleEnabled(triangle);
     Waveform_SetSweepRate(rate);
+    s_sweep_rate_hz = Waveform_GetSweepRate_Hz();
+    Waveform_SetPauseUs(pause_us);
     /* Output stays disabled until master sends Output Enable command */
 }
 
@@ -174,6 +192,14 @@ uint8_t MBReg_ReadHolding(uint16_t addr, uint16_t *value)
     else if (addr == REG_SWEEP_RATE_KHZ)
     {
         *value = (uint16_t)(s_sweep_rate_hz / 1000U);  /* Hz -> kHz */
+    }
+    else if (addr == REG_SWEEP_PAUSE_US)
+    {
+        *value = s_sweep_pause_us;
+    }
+    else if (addr == REG_WAVEFORM_TRIANGLE)
+    {
+        *value = s_triangle_enabled;
     }
     else if (addr >= REG_CAL_BASE && addr <= REG_CAL_END)
     {
@@ -221,7 +247,25 @@ uint8_t MBReg_WriteHolding(uint16_t addr, uint16_t value)
             return MB_EX_ILLEGAL_VALUE;
         s_sweep_rate_hz = rate;
         Waveform_SetSweepRate(rate);
+        s_sweep_rate_hz = Waveform_GetSweepRate_Hz();
         /* Applied live; persisted to EEPROM at end-of-frame */
+        s_persist_dirty = 1U;
+    }
+    else if (addr == REG_SWEEP_PAUSE_US)
+    {
+        if (value > WAVEFORM_MAX_PAUSE_US)
+            return MB_EX_ILLEGAL_VALUE;
+        s_sweep_pause_us = value;
+        Waveform_SetPauseUs(value);
+        s_persist_dirty = 1U;
+    }
+    else if (addr == REG_WAVEFORM_TRIANGLE)
+    {
+        if (value > 1U)
+            return MB_EX_ILLEGAL_VALUE;
+        s_triangle_enabled = (uint8_t)value;
+        Waveform_SetTriangleEnabled(s_triangle_enabled);
+        s_sweep_rate_hz = Waveform_GetSweepRate_Hz();
         s_persist_dirty = 1U;
     }
     else if (addr >= REG_CAL_BASE && addr <= REG_CAL_END)

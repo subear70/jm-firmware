@@ -1,0 +1,208 @@
+# Modbus RTU Protocol Specification — Shared Contract
+
+This document defines the wire protocol shared between the
+[desktop controller](desktop-modbus-controller-spec.md) (Modbus RTU **master**)
+and the [STM32 firmware](stm32-waveform-node-spec.md) (Modbus RTU **slave**).
+Both implementations MUST agree on every address, unit, encoding and framing
+rule described here.
+
+## 1. Physical & link layer
+
+| Property | Value |
+|----------|-------|
+| Physical layer | RS485 half-duplex (2-wire), or ST-Link USB VCP in debug mode |
+| Signalling | UART, TTL into RS485 transceiver |
+| Baud rate | 115200 (firmware default) |
+| Frame format | 8 data bits, No parity, 1 stop bit (8N1) |
+| Byte order | Big-endian (Modbus standard) for register values and CRC field positioning |
+| Addressing | Unicast 1–247; address 0 = broadcast (writes only, no response) |
+| Max devices | Up to 32 nodes per bus segment |
+
+The slave selects its UART at compile time via `VCP_MODE` in
+`Inc/config.h`:
+
+- `VCP_MODE = 1` → USART2 (PA2/PA3), onboard ST-Link virtual COM port. RS485
+  direction toggling is skipped.
+- `VCP_MODE = 0` → USART1 (PA9/PA10) with an external RS485 transceiver;
+  DE/RE direction is driven on PA1.
+
+## 2. Modbus RTU framing
+
+A Modbus RTU **ADU** (Application Data Unit) is:
+
+```
+┌──────────┬───────────────────────────┬───────────┐
+│ Address  │           PDU             │  CRC16    │
+│ 1 byte   │  Function code + data     │  2 bytes  │
+└──────────┴───────────────────────────┴───────────┘
+```
+
+- Frame boundaries are detected by an inter-character silence of ≥ 3.5
+  character times. At 115200 baud one 11-bit character ≈ 95.5 µs, so 3.5
+  characters ≈ 334 µs. The firmware uses a **500 µs** TIM6 timeout for margin.
+- The CRC is transmitted **low byte first, then high byte**.
+- Minimum valid frame length is 4 bytes (address + function code + CRC).
+
+### 2.1 CRC16
+
+- Algorithm: Modbus CRC16, polynomial `0xA001` (reflected `0x8005`), initial
+  value `0xFFFF`.
+- The desktop computes it from a runtime-built lookup table
+  (`ModbusCrc.Compute`); the firmware uses a static 256-entry table
+  (`s_crc_table` in `modbus_rtu.c`). Both produce identical values.
+
+## 3. Supported function codes
+
+| FC | Name | Direction | Used for |
+|----|------|-----------|----------|
+| `0x03` | Read Holding Registers | Master → Slave | Read waveform config + calibration |
+| `0x04` | Read Input Registers | Master → Slave | Read status / live output values |
+| `0x06` | Write Single Register | Master → Slave | Set one parameter (also device-ID change) |
+| `0x10` | Write Multiple Registers | Master → Slave | Bulk-write config + calibration |
+
+Any other function code returns exception `0x01` (Illegal Function).
+
+### 3.1 Request / response frames
+
+**FC03 / FC04 request** (8 bytes):
+
+```
+addr | fc | startHi | startLo | countHi | countLo | crcLo | crcHi
+```
+
+**FC03 / FC04 response** (`3 + 2·count + 2` bytes):
+
+```
+addr | fc | byteCount | dataHi dataLo (×count) | crcLo | crcHi
+```
+
+**FC06 request / response** (8 bytes, response echoes the request):
+
+```
+addr | 0x06 | regHi | regLo | valHi | valLo | crcLo | crcHi
+```
+
+**FC16 request** (`9 + 2·count` bytes):
+
+```
+addr | 0x10 | startHi startLo | countHi countLo | byteCount | data… | crcLo crcHi
+```
+
+**FC16 response** (8 bytes):
+
+```
+addr | 0x10 | startHi startLo | countHi countLo | crcLo | crcHi
+```
+
+### 3.2 Exception responses
+
+An exception frame is 5 bytes:
+
+```
+addr | (fc | 0x80) | exceptionCode | crcLo | crcHi
+```
+
+| Code | Meaning | Raised when |
+|------|---------|-------------|
+| `0x01` | Illegal function | Unsupported function code |
+| `0x02` | Illegal data address | Register address outside the map |
+| `0x03` | Illegal data value | Bad count, malformed frame, or out-of-range value (sweep rate, device address) |
+
+The master (`ModbusClient.ReadResponse`) reads the 2-byte header first and
+detects the error bit (`fc | 0x80`) so a short exception frame is not mistaken
+for a timeout. Bad-CRC frames are validated before the exception is surfaced.
+
+### 3.3 Slave-side frame handling rules
+
+- Frames whose address is neither the device address nor broadcast (0) are
+  silently ignored.
+- Frames failing CRC are silently discarded (no response).
+- Read function codes (FC03/FC04) are never honored for broadcast.
+- Broadcast writes (FC06/FC16) are executed but generate **no** response.
+- Register read/write counts are bounded (FC03/FC04 ≤ 125 regs; FC16 ≤ 123
+  regs) or exception `0x03` is returned.
+
+## 4. Register map
+
+### 4.1 Holding registers — FC03 (read) / FC06, FC16 (write)
+
+| Address (hex) | Name | Type | Unit | Range | R/W | Notes |
+|---------------|------|------|------|-------|-----|-------|
+| `0x0000` | Min Frequency | uint16 | Hz | any uint16 | R/W | Sweep start frequency. No range/order validation in firmware. |
+| `0x0001` | Max Frequency | uint16 | Hz | any uint16 | R/W | Sweep end frequency. No range/order validation in firmware. |
+| `0x0002` | Output Enable | uint16 | — | 0 / 1 | R/W | 0 = stop (DAC to 0 V), non-zero = start. Volatile (not persisted). |
+| `0x0003` | Sweep Rate | uint16 | kHz | 1 – 500 sawtooth; 1 – 333 triangle | R/W | Active ramp rate, excluding pause. Applied live; auto-persisted. Triangle mode is capped to keep the DAC sample rate at or below 1 MSPS. |
+| `0x0004`–`0x0017` | Calibration block | uint16 ×20 | Hz / mV | — | R/W | 10 pairs `[freq0, volt0, … freq9, volt9]`. Applied + persisted at end of frame. |
+| `0x0018` | Device Address | uint16 | — | 1 – 247 | R/W | Persisted Modbus address. Written via FC06; response comes from the old address, then the node answers on the new one. Out-of-range → `0x03`. |
+| `0x0019` | Sweep Pause | uint16 | us | 0 – 10,000 | R/W | Fly back to and hold the calibrated low DAC endpoint between sweeps. Applied live and persisted; rounds up to the next DAC sample interval. Out-of-range → `0x03`. |
+| `0x001A` | Triangle Mode | uint16 (bool) | — | 0 / 1 | R/W | 0 = sawtooth; 1 = triangle. Applied live and persisted. Other values → `0x03`. |
+
+> **Unit note:** The firmware treats Min/Max frequency internally in Hz. The
+> desktop UI labels them "MHz" (see the UI spec) — the raw uint16 register value
+> is transported unchanged; interpretation is a UI-layer convention.
+
+### 4.2 Input registers — FC04 (read only)
+
+| Address (hex) | Name | Type | Unit | Description |
+|---------------|------|------|------|-------------|
+| `0x0000` | Device Status | uint16 | flags | Bit flags (see below) |
+| `0x0001` | Current Frequency | uint16 | Hz | Reverse-interpolated from live DAC voltage |
+| `0x0002` | Current Voltage | uint16 | mV | Live DAC output voltage |
+
+### 4.3 Device status bit flags (input register `0x0000`)
+
+| Bit | Mask | Meaning | Set when |
+|-----|------|---------|----------|
+| 0 | `0x0001` | Waveform running | Sweep DMA is active |
+| 1 | `0x0002` | Config valid | No frequency-range error latched |
+| 2 | `0x0004` | Frequency range error | Range error latched (currently never set — no validation) |
+| 3 | `0x0008` | Calibration data invalid | No valid calibration table loaded |
+| 4–15 | — | Reserved | — |
+
+## 5. Calibration
+
+The node maps a desired **frequency (Hz)** to the **DAC voltage (mV)** needed to
+tune the VCO to that frequency. The master writes 10 calibration points
+(freq/voltage pairs), ascending by frequency.
+
+On write of the calibration block, the firmware:
+
+1. Stages the 20 register values.
+2. At end of frame, converts them to `CalibrationPoint_t[10]`, loads them into
+   the waveform module, and re-applies the current sweep.
+3. Persists the block to Flash-emulated EEPROM automatically (no separate save
+   command).
+4. Sets the `Calibration data invalid` status bit if no valid table is present.
+
+The firmware performs integer **linear interpolation** between calibration
+points to derive the DAC voltage for any frequency in range, and reverse
+interpolation to report the current frequency. Out-of-range frequencies clamp
+to the table endpoints.
+
+## 6. Persistence semantics
+
+| Register(s) | Persisted? | When |
+|-------------|------------|------|
+| Min/Max Frequency | Yes | End of frame (coalesced) |
+| Sweep Rate | Yes | End of frame (coalesced) |
+| Calibration block | Yes | End of frame (coalesced) |
+| Sweep Pause | Yes | End of frame (coalesced) |
+| Triangle Mode | Yes | End of frame (coalesced) |
+| Device Address | Yes | **Immediately** within the write handler |
+| Output Enable | No | Volatile runtime state only |
+
+Writes that change persistent values set a dirty flag; a single
+`MBReg_CommitIfDirty()` at the end of each processed frame performs at most one
+Flash sector erase/program — so a bulk FC16 write is one Flash cycle, not one
+per register.
+
+## 7. Timing & error handling
+
+| Parameter | Master | Slave |
+|-----------|--------|-------|
+| Inter-frame gap | Adapter/OS driven | 500 µs (TIM6) |
+| Response timeout | 2000 ms (`ModbusClient.ReadTimeoutMs`) | n/a |
+| Read/Write serial timeout | 2000 ms | n/a |
+| Bad CRC | Throws `ModbusCrcException` | Silently discards |
+| No response | Throws `ModbusTimeoutException` | n/a |
+| Device exception | Throws `ModbusException` with code | Sends 5-byte exception frame |

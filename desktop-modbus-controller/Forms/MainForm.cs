@@ -21,8 +21,8 @@ namespace DesktopModbusController.Forms
     /// </summary>
     public sealed class MainForm : Form
     {
-        // Holding registers are contiguous from 0x0000, so they can be read /
-        // written in a single FC03 / FC16 transaction.
+        // The first 24 holding registers are contiguous. 0x0019 and 0x001A
+        // are read/written separately because 0x0018 is the device address.
         private static readonly (ushort Address, string Name)[] RegisterDefs =
         {
             (0x0000, "Min Frequency (MHz)"),
@@ -49,8 +49,11 @@ namespace DesktopModbusController.Forms
             (0x0015, "Cal 9 Voltage (mV)"),
             (0x0016, "Cal 10 Freq (MHz)"),
             (0x0017, "Cal 10 Voltage (mV)"),
+            (ModbusRegisters.SweepPauseUs, "Sweep Pause (us)"),
+            (ModbusRegisters.WaveformTriangle, "Triangle Wave (0/1)"),
         };
 
+        private const int ContiguousHoldingRegisterCount = 24;
         private static readonly int[] BaudRates = { 9600, 19200, 38400, 57600, 115200 };
 
         private IModbusClient _client;
@@ -294,12 +297,19 @@ namespace DesktopModbusController.Forms
             {
                 byte addr = (byte)_numAddress.Value;
                 ushort[] values = _client.ReadHoldingRegisters(
-                    addr, RegisterDefs[0].Address, (ushort)RegisterDefs.Length);
+                    addr, RegisterDefs[0].Address, ContiguousHoldingRegisterCount);
 
-                for (int i = 0; i < _regBoxes.Length; i++)
+                for (int i = 0; i < ContiguousHoldingRegisterCount; i++)
                     _regBoxes[i].Text = values[i].ToString(CultureInfo.InvariantCulture);
+                for (int i = ContiguousHoldingRegisterCount; i < RegisterDefs.Length; i++)
+                {
+                    ushort value = _client.ReadHoldingRegisters(addr, RegisterDefs[i].Address, 1)[0];
+                    if (!IsRegisterValueValid(RegisterDefs[i].Address, value))
+                        throw new InvalidDataException($"Device returned invalid {RegisterDefs[i].Name} value {value}.");
+                    _regBoxes[i].Text = value.ToString(CultureInfo.InvariantCulture);
+                }
 
-                SetStatus($"Read {values.Length} registers.", false);
+                SetStatus($"Read {RegisterDefs.Length} holding registers.", false);
             }
             catch (Exception ex)
             {
@@ -322,13 +332,37 @@ namespace DesktopModbusController.Forms
                     _regBoxes[i].SelectAll();
                     return;
                 }
+                if (!IsRegisterValueValid(RegisterDefs[i].Address, values[i]))
+                {
+                    string allowed = RegisterDefs[i].Address == ModbusRegisters.SweepPauseUs
+                        ? $"0–{ModbusRegisters.MaxSweepPauseUs} us"
+                        : "0 or 1";
+                    ShowError($"{RegisterDefs[i].Name} must be {allowed}.");
+                    _regBoxes[i].Focus();
+                    _regBoxes[i].SelectAll();
+                    return;
+                }
             }
 
             try
             {
                 byte addr = (byte)_numAddress.Value;
-                _client.WriteMultipleRegisters(addr, RegisterDefs[0].Address, values);
-                SetStatus($"Wrote {values.Length} registers.", false);
+                var bulkValues = new ushort[ContiguousHoldingRegisterCount];
+                Array.Copy(values, bulkValues, ContiguousHoldingRegisterCount);
+                _client.WriteMultipleRegisters(addr, RegisterDefs[0].Address, bulkValues);
+                for (int i = ContiguousHoldingRegisterCount; i < values.Length; i++)
+                {
+                    try
+                    {
+                        _client.WriteSingleRegister(addr, RegisterDefs[i].Address, values[i]);
+                    }
+                    catch (Exception ex)
+                    {
+                        ShowError($"Registers 0x0000–0x0017 were written, but {RegisterDefs[i].Name} could not be updated: {ex.Message}");
+                        return;
+                    }
+                }
+                SetStatus($"Wrote {values.Length} holding registers.", false);
             }
             catch (Exception ex)
             {
@@ -448,13 +482,15 @@ namespace DesktopModbusController.Forms
                         if (addrText.Equals("Address", StringComparison.OrdinalIgnoreCase)) continue; // header
 
                         if (!TryParseAddress(addrText, out ushort address)) continue;
-                        if (!indexByAddress.TryGetValue(address, out int idx)) continue;
 
                         // Value is the last field, so a comma inside the name column is harmless.
                         string valText = parts[parts.Length - 1].Trim();
                         if (!ushort.TryParse(valText, NumberStyles.Integer,
                                 CultureInfo.InvariantCulture, out ushort value))
                             continue;
+
+                        if (!indexByAddress.TryGetValue(address, out int idx)) continue;
+                        if (!IsRegisterValueValid(address, value)) continue;
 
                         _regBoxes[idx].Text = value.ToString(CultureInfo.InvariantCulture);
                         applied++;
@@ -477,6 +513,15 @@ namespace DesktopModbusController.Forms
                     CultureInfo.InvariantCulture, out address);
             return ushort.TryParse(text, NumberStyles.Integer,
                 CultureInfo.InvariantCulture, out address);
+        }
+
+        private static bool IsRegisterValueValid(ushort address, ushort value)
+        {
+            if (address == ModbusRegisters.SweepPauseUs)
+                return value <= ModbusRegisters.MaxSweepPauseUs;
+            if (address == ModbusRegisters.WaveformTriangle)
+                return value <= 1U;
+            return true;
         }
 
         // ── Helpers ────────────────────────────────────────────────────────────────

@@ -27,7 +27,9 @@ void EEPROM_Init(void);
  * @brief  Persist waveform configuration and calibration data to EEPROM.
  * @param  min_freq_hz   Minimum sweep frequency (Hz)
  * @param  max_freq_hz   Maximum sweep frequency (Hz)
- * @param  sweep_rate_hz Sweep repetition rate (full up+down cycles per second)
+ * @param  sweep_rate_hz Active sweep-ramp rate (excluding inter-sweep pause)
+ * @param  pause_us      Hold time between sweeps (microseconds)
+ * @param  triangle      Waveform mode (0=sawtooth, 1=triangle)
  * @param  points        Calibration point array
  * @param  num_points    Number of entries in points[] (max CALIBRATION_POINTS)
  * @param  device_addr   Modbus device address (1–247) to persist
@@ -36,6 +38,8 @@ void EEPROM_Init(void);
 EepromStatus_t EEPROM_SaveConfig(uint16_t                 min_freq_hz,
                                  uint16_t                 max_freq_hz,
                                  uint32_t                 sweep_rate_hz,
+                                 uint16_t                 pause_us,
+                                 uint8_t                  triangle,
                                  const CalibrationPoint_t *points,
                                  uint8_t                  num_points,
                                  uint8_t                  device_addr);
@@ -44,7 +48,9 @@ EepromStatus_t EEPROM_SaveConfig(uint16_t                 min_freq_hz,
  * @brief  Restore waveform configuration and calibration data from EEPROM.
  * @param  min_freq_hz   Output: minimum sweep frequency (Hz)
  * @param  max_freq_hz   Output: maximum sweep frequency (Hz)
- * @param  sweep_rate_hz Output: sweep repetition rate (Hz)
+ * @param  sweep_rate_hz Output: active sweep-ramp rate (Hz), excluding pause
+ * @param  pause_us      Output: hold time between sweeps (microseconds)
+ * @param  triangle      Output: waveform mode (0=sawtooth, 1=triangle)
  * @param  points        Output: calibration array (caller provides CALIBRATION_POINTS entries)
  * @param  num_points    Output: number of valid calibration entries read
  * @param  device_addr   Output: persisted Modbus device address (1–247)
@@ -53,6 +59,8 @@ EepromStatus_t EEPROM_SaveConfig(uint16_t                 min_freq_hz,
 EepromStatus_t EEPROM_LoadConfig(uint16_t          *min_freq_hz,
                                  uint16_t          *max_freq_hz,
                                  uint32_t          *sweep_rate_hz,
+                                 uint16_t          *pause_us,
+                                  uint8_t           *triangle,
                                  CalibrationPoint_t *points,
                                  uint8_t           *num_points,
                                  uint8_t           *device_addr);

@@ -43,22 +43,42 @@ typedef enum
 void Waveform_Init(DAC_HandleTypeDef *hdac, TIM_HandleTypeDef *htim2);
 
 /**
- * @brief  Set the sweep repetition rate (full up+down cycles per second).
+ * @brief  Set the active sweep-ramp rate, excluding the inter-sweep pause.
  *         Reprograms the TIM2 auto-reload so the DAC-DMA streams the sample
  *         buffer at sweep_rate * N samples/second, where N is the dynamic DAC
  *         sample count chosen from the rate (WAVEFORM_MIN/MAX_SAMPLES).  If N
  *         changes the ramp buffer is rebuilt and the DMA restarted.
  *         Takes effect immediately while running.
- * @param  sweeps_per_sec  Requested rate, clamped to
- *         WAVEFORM_MIN_SWEEP_RATE_HZ .. WAVEFORM_MAX_SWEEP_RATE_HZ.
+ * @param  sweeps_per_sec  Requested rate, clamped to the supported limits.
+ *         Triangle mode is additionally capped to WAVEFORM_MAX_TRIANGLE_SWEEP_RATE_HZ.
  */
 void Waveform_SetSweepRate(uint32_t sweeps_per_sec);
 
 /**
- * @brief  Return the currently configured sweep repetition rate.
- * @return Sweep rate in Hz (full up+down cycles per second)
+ * @brief  Return the currently configured active sweep-ramp rate.
+ * @return Sweep rate in Hz, excluding the inter-sweep pause
  */
 uint32_t Waveform_GetSweepRate_Hz(void);
+
+/**
+ * @brief  Set the hold time at the calibrated low DAC level between sweeps.
+ *         The requested pause is rounded up to the next DAC sample interval.
+ * @param  pause_us  Pause in microseconds, clamped to WAVEFORM_MAX_PAUSE_US.
+ */
+void Waveform_SetPauseUs(uint16_t pause_us);
+
+/**
+ * @brief  Return the configured hold time between completed sweeps.
+ * @return Pause in microseconds
+ */
+uint16_t Waveform_GetPauseUs(void);
+
+/**
+ * @brief  Select triangle mode when nonzero; zero selects sawtooth mode.
+ *         Rebuilds the DMA buffer immediately if the waveform is running.
+ * @param  enabled  Boolean waveform selection (0 = sawtooth, 1 = triangle)
+ */
+void Waveform_SetTriangleEnabled(uint8_t enabled);
 
 /**
  * @brief  Set the frequency sweep range.

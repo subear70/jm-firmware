@@ -3,7 +3,7 @@
  * Purpose:      Flash-emulated EEPROM driver (STM32F446RE Sector 7)
  *               Persists waveform config and calibration data.
  *               Strategy: erase sector, then program word-by-word.
- *               Write frequency is low (only on explicit calibration save).
+ *               Configuration changes are coalesced per Modbus frame.
  * Dependencies: eeprom.h, config.h
  */
 #include "eeprom.h"
@@ -19,9 +19,11 @@
  *  4       2     max_freq_hz
  *  6       1     num_cal_points
  *  7       1     device_addr (Modbus address, 1–247)
- *  8       4     sweep_rate_hz (full up+down cycles per second)
+ *  8       4     sweep_rate_hz (active sweep-ramp rate, excluding pause)
  *  12      40    cal_points[10]  (each 4 bytes: freq_hz uint16 + voltage_mv uint16)
- *  Total:  52 bytes
+ *  52      2     pause_us (inter-sweep hold time; absent in older blocks => 0)
+ *  54      1     triangle (0=sawtooth, 1=triangle; absent/invalid => sawtooth)
+ *  Total:  55 bytes (rounded to 56 bytes for Flash word programming)
  * -------------------------------------------------------------------------- */
 
 typedef struct __attribute__((packed))
@@ -33,6 +35,8 @@ typedef struct __attribute__((packed))
     uint8_t            device_addr;
     uint32_t           sweep_rate_hz;
     CalibrationPoint_t cal_points[CALIBRATION_POINTS];
+    uint16_t           pause_us;
+    uint8_t            triangle;
 } EepromBlock_t;
 
 /* Round up to 32-bit word count for Flash programming */
@@ -50,6 +54,8 @@ void EEPROM_Init(void)
 EepromStatus_t EEPROM_SaveConfig(uint16_t                 min_freq_hz,
                                   uint16_t                 max_freq_hz,
                                   uint32_t                 sweep_rate_hz,
+                                  uint16_t                 pause_us,
+                                  uint8_t                  triangle,
                                   const CalibrationPoint_t *points,
                                   uint8_t                  num_points,
                                   uint8_t                  device_addr)
@@ -66,6 +72,8 @@ EepromStatus_t EEPROM_SaveConfig(uint16_t                 min_freq_hz,
     blk.num_cal_points = num_points;
     blk.device_addr    = device_addr;
     blk.sweep_rate_hz  = sweep_rate_hz;
+    blk.pause_us       = pause_us;
+    blk.triangle       = triangle;
 
     uint8_t n = (num_points > CALIBRATION_POINTS) ? CALIBRATION_POINTS : num_points;
     memcpy(blk.cal_points, points, (size_t)n * sizeof(CalibrationPoint_t));
@@ -108,6 +116,8 @@ EepromStatus_t EEPROM_SaveConfig(uint16_t                 min_freq_hz,
 EepromStatus_t EEPROM_LoadConfig(uint16_t          *min_freq_hz,
                                   uint16_t          *max_freq_hz,
                                   uint32_t          *sweep_rate_hz,
+                                  uint16_t          *pause_us,
+                                  uint8_t           *triangle,
                                   CalibrationPoint_t *points,
                                   uint8_t           *num_points,
                                   uint8_t           *device_addr)
@@ -120,6 +130,8 @@ EepromStatus_t EEPROM_LoadConfig(uint16_t          *min_freq_hz,
     *min_freq_hz   = blk->min_freq_hz;
     *max_freq_hz   = blk->max_freq_hz;
     *sweep_rate_hz = blk->sweep_rate_hz;
+    *pause_us      = blk->pause_us;
+    *triangle      = blk->triangle;
     *device_addr   = blk->device_addr;
     *num_points    = (blk->num_cal_points > CALIBRATION_POINTS)
                      ? CALIBRATION_POINTS : blk->num_cal_points;

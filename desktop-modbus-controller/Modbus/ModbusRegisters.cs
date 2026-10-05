@@ -16,7 +16,7 @@ namespace DesktopModbusController.Modbus
         /// <summary>Output enable: 0 = off, 1 = on. R/W.</summary>
         public const ushort OutputEnable      = 0x0002;
 
-        /// <summary>Sweep repetition rate in kHz (1–500). R/W. Applied live and
+        /// <summary>Active sweep-ramp rate in kHz (1–500). R/W. Applied live and
         /// persisted to EEPROM automatically on write.</summary>
         public const ushort SweepRateKHz      = 0x0003;
 
@@ -34,6 +34,13 @@ namespace DesktopModbusController.Modbus
         /// address the slave responds to and is stored to EEPROM immediately.
         /// </summary>
         public const ushort DeviceAddress     = 0x0018;
+
+        /// <summary>Hold time between completed sweeps in microseconds (0–10000). R/W and persisted.</summary>
+        public const ushort SweepPauseUs     = 0x0019;
+        public const ushort MaxSweepPauseUs  = 10000;
+
+        /// <summary>Waveform mode: 0 = sawtooth, 1 = triangle. R/W and persisted.</summary>
+        public const ushort WaveformTriangle = 0x001A;
 
         // ── Input registers (FC04) ────────────────────────────────────────────
         /// <summary>Device status bit-flags. R only.</summary>

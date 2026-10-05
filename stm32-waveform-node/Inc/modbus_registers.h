@@ -15,10 +15,12 @@
 #define REG_MIN_FREQ_HZ          0x0000U  /* uint16, Hz, R/W */
 #define REG_MAX_FREQ_HZ          0x0001U  /* uint16, Hz, R/W */
 #define REG_OUTPUT_ENABLE        0x0002U  /* uint16, 0/1,  R/W */
-#define REG_SWEEP_RATE_KHZ       0x0003U  /* uint16, sweep repetition rate in kHz, R/W (applied live, auto-persisted) */
+#define REG_SWEEP_RATE_KHZ       0x0003U  /* uint16, active ramp rate in kHz, R/W (applied live, auto-persisted) */
 #define REG_CAL_BASE             0x0004U  /* 20 regs: [freq0,v0, freq1,v1, ...] */
 #define REG_CAL_END              0x0017U  /* last calibration register (inclusive) */
 #define REG_DEVICE_ADDRESS       0x0018U  /* uint16, Modbus address 1–247, R/W (persisted) */
+#define REG_SWEEP_PAUSE_US       0x0019U  /* uint16, inter-sweep pause in us, 0–WAVEFORM_MAX_PAUSE_US, R/W (persisted) */
+#define REG_WAVEFORM_TRIANGLE    0x001AU  /* bool, 0=sawtooth, 1=triangle, R/W (persisted) */
 
 /* --------------------------------------------------------------------------
  * Input register addresses (FC04)
@@ -66,7 +68,7 @@ void MBReg_CommitIfDirty(void);
 
 /**
  * @brief  Read a holding register.
- * @param  addr   Register address (0x0000 – 0x0017)
+ * @param  addr   Register address (0x0000 – 0x001A)
  * @param  value  Output: register value
  * @return 0 on success, MB_EX_ILLEGAL_ADDRESS if address unknown
  */
