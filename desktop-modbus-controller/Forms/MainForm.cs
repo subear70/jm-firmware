@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -88,7 +89,8 @@ namespace DesktopModbusController.Forms
 
         private void BuildUi()
         {
-            Text = "Modbus Controller";
+            Version version = typeof(MainForm).Assembly.GetName().Version;
+            Text = $"Modbus Controller v{version.Major}.{version.Minor}.{version.Build}";
             Font = new Font("Segoe UI", 9f);
             ClientSize = new Size(420, 712);
             MinimumSize = new Size(436, 592);
