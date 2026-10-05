@@ -15,6 +15,7 @@
  * -------------------------------------------------------------------------- */
 static DAC_HandleTypeDef *s_hdac  = NULL;
 static TIM_HandleTypeDef *s_htim2 = NULL;
+static uint32_t s_dac_channel = DAC_CHANNEL_1;
 
 static volatile WaveformStatus_t s_status = WAVEFORM_STOPPED;
 
@@ -256,15 +257,57 @@ static void apply_timer_rate(void)
  *         Disabling all three lets the DMA free-run; a stray underrun merely
  *         repeats a sample instead of freezing or stalling the firmware.
  */
+static DMA_HandleTypeDef *active_dac_dma_handle(void)
+{
+    return (s_dac_channel == DAC_CHANNEL_1)
+        ? s_hdac->DMA_Handle1
+        : s_hdac->DMA_Handle2;
+}
+
+static uint32_t active_dac_dma_underrun_it(void)
+{
+    return (s_dac_channel == DAC_CHANNEL_1) ? DAC_IT_DMAUDR1 : DAC_IT_DMAUDR2;
+}
+
+static uint32_t active_dac_dma_underrun_flag(void)
+{
+    return (s_dac_channel == DAC_CHANNEL_1) ? DAC_FLAG_DMAUDR1 : DAC_FLAG_DMAUDR2;
+}
+
+static void configure_dac_output_pin(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Mode = GPIO_MODE_ANALOG;
+    gpio.Pull = GPIO_NOPULL;
+
+    if (s_dac_channel == DAC_CHANNEL_2)
+    {
+        gpio.Pin = GPIO_PIN_5;
+        HAL_GPIO_Init(GPIOA, &gpio);
+        return;
+    }
+
+    gpio.Pin = GPIO_PIN_4;
+    HAL_GPIO_Init(GPIOA, &gpio);
+
+    /* PA5 is LD2 when channel 2 is not being used as the DAC output. */
+    gpio.Pin = GPIO_PIN_5;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &gpio);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+}
+
 static void dac_dma_silence_irq(void)
 {
     if (s_hdac == NULL) return;
 
     /* Ignore DAC DMA underruns (do not let HAL stop the stream on one) */
-    __HAL_DAC_DISABLE_IT(s_hdac, DAC_IT_DMAUDR1);
+    __HAL_DAC_DISABLE_IT(s_hdac, active_dac_dma_underrun_it());
 
-    if (s_hdac->DMA_Handle1 != NULL)
-        __HAL_DMA_DISABLE_IT(s_hdac->DMA_Handle1, DMA_IT_HT | DMA_IT_TC);
+    DMA_HandleTypeDef *dma = active_dac_dma_handle();
+    if (dma != NULL)
+        __HAL_DMA_DISABLE_IT(dma, DMA_IT_HT | DMA_IT_TC);
 }
 
 static void restart_dma_stream(void)
@@ -273,10 +316,10 @@ static void restart_dma_stream(void)
 
     build_dac_buffer();
     HAL_TIM_Base_Stop(s_htim2);
-    HAL_DAC_Stop_DMA(s_hdac, DAC_CHANNEL_1);
+    HAL_DAC_Stop_DMA(s_hdac, s_dac_channel);
     apply_timer_rate();
-    __HAL_DAC_CLEAR_FLAG(s_hdac, DAC_FLAG_DMAUDR1);
-    (void)HAL_DAC_Start_DMA(s_hdac, DAC_CHANNEL_1,
+    __HAL_DAC_CLEAR_FLAG(s_hdac, active_dac_dma_underrun_flag());
+    (void)HAL_DAC_Start_DMA(s_hdac, s_dac_channel,
                             (uint32_t *)s_dac_buffer, s_dma_samples,
                             DAC_ALIGN_12B_R);
     dac_dma_silence_irq();
@@ -291,6 +334,7 @@ void Waveform_Init(DAC_HandleTypeDef *hdac, TIM_HandleTypeDef *htim2)
 {
     s_hdac  = hdac;
     s_htim2 = htim2;
+    s_dac_channel = DAC_CHANNEL_1;
     s_status         = WAVEFORM_STOPPED;
     s_num_cal_points = 0U;
     s_sweep_rate_hz  = WAVEFORM_DEFAULT_SWEEP_RATE_HZ;
@@ -363,10 +407,10 @@ void Waveform_SetSweepRate(uint32_t sweeps_per_sec)
             build_dac_buffer();
 
             HAL_TIM_Base_Stop(s_htim2);
-            HAL_DAC_Stop_DMA(s_hdac, DAC_CHANNEL_1);
+            HAL_DAC_Stop_DMA(s_hdac, s_dac_channel);
             apply_timer_rate();
-            __HAL_DAC_CLEAR_FLAG(s_hdac, DAC_FLAG_DMAUDR1);
-            (void)HAL_DAC_Start_DMA(s_hdac, DAC_CHANNEL_1,
+            __HAL_DAC_CLEAR_FLAG(s_hdac, active_dac_dma_underrun_flag());
+            (void)HAL_DAC_Start_DMA(s_hdac, s_dac_channel,
                                     (uint32_t *)s_dac_buffer, s_dma_samples,
                                     DAC_ALIGN_12B_R);
             dac_dma_silence_irq();
@@ -450,13 +494,14 @@ void Waveform_Start(void)
     DAC_ChannelConfTypeDef sConfig = {0};
     sConfig.DAC_Trigger      = DAC_TRIGGER_T2_TRGO;
     sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
-    HAL_DAC_Stop(s_hdac, DAC_CHANNEL_1);
-    (void)HAL_DAC_ConfigChannel(s_hdac, &sConfig, DAC_CHANNEL_1);
+    HAL_DAC_Stop(s_hdac, s_dac_channel);
+    (void)HAL_DAC_ConfigChannel(s_hdac, &sConfig, s_dac_channel);
 
     /* Program the sweep rate, then start circular DMA + trigger timer */
     apply_timer_rate();
 
-    if (HAL_DAC_Start_DMA(s_hdac, DAC_CHANNEL_1,
+    __HAL_DAC_CLEAR_FLAG(s_hdac, active_dac_dma_underrun_flag());
+    if (HAL_DAC_Start_DMA(s_hdac, s_dac_channel,
                           (uint32_t *)s_dac_buffer, s_dma_samples,
                           DAC_ALIGN_12B_R) != HAL_OK)
     {
@@ -468,18 +513,64 @@ void Waveform_Start(void)
     s_status = WAVEFORM_RUNNING;
 }
 
+void Waveform_SetDacChannel(uint8_t dac_channel)
+{
+    if (s_hdac == NULL || s_htim2 == NULL) return;
+    if (dac_channel != 1U && dac_channel != 2U) return;
+
+    uint32_t new_channel = (dac_channel == 1U) ? DAC_CHANNEL_1 : DAC_CHANNEL_2;
+    if (new_channel == s_dac_channel) return;
+
+    uint8_t was_running = (s_status & WAVEFORM_RUNNING) ? 1U : 0U;
+    HAL_TIM_Base_Stop(s_htim2);
+    if (was_running)
+        HAL_DAC_Stop_DMA(s_hdac, s_dac_channel);
+    else
+        (void)HAL_DAC_Stop(s_hdac, s_dac_channel);
+
+    s_dac_channel = new_channel;
+    configure_dac_output_pin();
+
+    DAC_ChannelConfTypeDef sConfig = {0};
+    sConfig.DAC_Trigger      = was_running ? DAC_TRIGGER_T2_TRGO : DAC_TRIGGER_NONE;
+    sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+    if (HAL_DAC_ConfigChannel(s_hdac, &sConfig, s_dac_channel) != HAL_OK)
+        return;
+
+    if (was_running)
+    {
+        build_dac_buffer();
+        apply_timer_rate();
+        __HAL_DAC_CLEAR_FLAG(s_hdac, active_dac_dma_underrun_flag());
+        if (HAL_DAC_Start_DMA(s_hdac, s_dac_channel,
+                              (uint32_t *)s_dac_buffer, s_dma_samples,
+                              DAC_ALIGN_12B_R) != HAL_OK)
+        {
+            s_status = (WaveformStatus_t)(s_status & (WAVEFORM_ERR_RANGE | WAVEFORM_ERR_CAL));
+            return;
+        }
+        dac_dma_silence_irq();
+        HAL_TIM_Base_Start(s_htim2);
+        s_status = WAVEFORM_RUNNING;
+        return;
+    }
+
+    HAL_DAC_SetValue(s_hdac, s_dac_channel, DAC_ALIGN_12B_R, 0U);
+    (void)HAL_DAC_Start(s_hdac, s_dac_channel);
+}
+
 void Waveform_Stop(void)
 {
     HAL_TIM_Base_Stop(s_htim2);
-    HAL_DAC_Stop_DMA(s_hdac, DAC_CHANNEL_1);
+    HAL_DAC_Stop_DMA(s_hdac, s_dac_channel);
 
     /* Switch the channel to software update and drive the output to 0 V */
     DAC_ChannelConfTypeDef sConfig = {0};
     sConfig.DAC_Trigger      = DAC_TRIGGER_NONE;
     sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
-    (void)HAL_DAC_ConfigChannel(s_hdac, &sConfig, DAC_CHANNEL_1);
-    HAL_DAC_SetValue(s_hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0U);
-    HAL_DAC_Start(s_hdac, DAC_CHANNEL_1);
+    (void)HAL_DAC_ConfigChannel(s_hdac, &sConfig, s_dac_channel);
+    HAL_DAC_SetValue(s_hdac, s_dac_channel, DAC_ALIGN_12B_R, 0U);
+    HAL_DAC_Start(s_hdac, s_dac_channel);
 
     s_status = WAVEFORM_STOPPED;
 }
@@ -497,12 +588,12 @@ uint16_t Waveform_GetCurrentFrequency_Hz(void)
 uint16_t Waveform_GetCurrentVoltage_mV(void)
 {
     if (!(s_status & WAVEFORM_RUNNING)) return 0U;
-    if (s_hdac == NULL || s_hdac->DMA_Handle1 == NULL) return 0U;
+    if (s_hdac == NULL || active_dac_dma_handle() == NULL) return 0U;
 
     /* Derive the sample currently being output from the DMA transfer counter.
      * NDTR counts down from s_active_samples to 1. */
     uint16_t n = s_dma_samples;
-    uint32_t remaining = __HAL_DMA_GET_COUNTER(s_hdac->DMA_Handle1);
+    uint32_t remaining = __HAL_DMA_GET_COUNTER(active_dac_dma_handle());
     uint16_t index = 0U;
     if (remaining > 0U && remaining <= n)
         index = (uint16_t)(n - remaining);

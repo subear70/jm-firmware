@@ -12,6 +12,7 @@
 /* USER CODE BEGIN Includes */
 #include "config.h"
 extern DMA_HandleTypeDef hdma_dac1;
+extern DMA_HandleTypeDef hdma_dac2;
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN 0 */
@@ -83,6 +84,24 @@ void HAL_DAC_MspInit(DAC_HandleTypeDef* hdac)
     }
 
     __HAL_LINKDMA(hdac, DMA_Handle1, hdma_dac1);
+
+    /* DAC1 channel 2 DMA Init — DMA1_Stream6, Channel 7. */
+    hdma_dac2.Instance                 = DMA1_Stream6;
+    hdma_dac2.Init.Channel             = DMA_CHANNEL_7;
+    hdma_dac2.Init.Direction           = DMA_MEMORY_TO_PERIPH;
+    hdma_dac2.Init.PeriphInc           = DMA_PINC_DISABLE;
+    hdma_dac2.Init.MemInc              = DMA_MINC_ENABLE;
+    hdma_dac2.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
+    hdma_dac2.Init.MemDataAlignment    = DMA_MDATAALIGN_HALFWORD;
+    hdma_dac2.Init.Mode                = DMA_CIRCULAR;
+    hdma_dac2.Init.Priority            = DMA_PRIORITY_HIGH;
+    hdma_dac2.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_dac2) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    __HAL_LINKDMA(hdac, DMA_Handle2, hdma_dac2);
     /* USER CODE END DAC_MspInit 1 */
   }
 }
@@ -109,6 +128,7 @@ void HAL_DAC_MspDeInit(DAC_HandleTypeDef* hdac)
 
     /* USER CODE BEGIN DAC_MspDeInit 1 */
     HAL_DMA_DeInit(hdac->DMA_Handle1);
+    HAL_DMA_DeInit(hdac->DMA_Handle2);
     /* USER CODE END DAC_MspDeInit 1 */
   }
 }

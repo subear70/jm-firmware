@@ -25,6 +25,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define USER_BUTTON_PIN          GPIO_PIN_13
+#define USER_BUTTON_PORT         GPIOC
+#define USER_BUTTON_DEBOUNCE_MS  200U
 
 /* USER CODE END PD */
 
@@ -36,6 +39,7 @@
 /* Private variables ---------------------------------------------------------*/
 DAC_HandleTypeDef hdac;
 DMA_HandleTypeDef hdma_dac1;
+DMA_HandleTypeDef hdma_dac2;
 
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
@@ -44,6 +48,8 @@ TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart_modbus;
 
 /* USER CODE BEGIN PV */
+static volatile uint8_t s_button_toggle_pending = 0U;
+static uint32_t s_button_last_press_ms = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -128,10 +134,19 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* Process any complete Modbus frame received since last iteration.
-       The sweep is started/stopped by the master via the output-enable
-       register; the DAC-DMA engine then runs autonomously in hardware. */
+    /* Modbus and the onboard button share the same output-enable register state. */
     Modbus_Process();
+
+    if (s_button_toggle_pending != 0U)
+    {
+      __disable_irq();
+      uint8_t toggle_pending = s_button_toggle_pending;
+      s_button_toggle_pending = 0U;
+      __enable_irq();
+
+      if (toggle_pending != 0U)
+        MBReg_ToggleOutputEnable();
+    }
   }
   /* USER CODE END 3 */
 }
@@ -191,7 +206,7 @@ void SystemClock_Config(void)
 
 /**
   * @brief  DMA controller clock/NVIC initialization.
-  *         Enables DMA1 and the DMA1_Stream5 interrupt used by DAC channel 1.
+  *         Enables DMA1 Stream5/6 interrupts used by DAC channels 1/2.
   *         The stream itself is configured in HAL_DAC_MspInit().
   * @retval None
   */
@@ -204,6 +219,8 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream5_IRQn interrupt configuration (DAC1) */
   HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 }
 
 /**
@@ -365,6 +382,7 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
@@ -386,10 +404,31 @@ static void MX_GPIO_Init(void)
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
+  GPIO_InitStruct.Pin = USER_BUTTON_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(USER_BUTTON_PORT, &GPIO_InitStruct);
+
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 2U, 0U);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin != USER_BUTTON_PIN)
+    return;
+
+  uint32_t now = HAL_GetTick();
+  if ((uint32_t)(now - s_button_last_press_ms) < USER_BUTTON_DEBOUNCE_MS)
+    return;
+
+  s_button_last_press_ms = now;
+  s_button_toggle_pending = 1U;
+}
 
 /**
   * @brief  UART RX-complete callback — feeds one byte into the Modbus core.

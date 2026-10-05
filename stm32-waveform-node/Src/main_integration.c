@@ -33,8 +33,9 @@
  *   UART2 RX ISR  → Modbus_RxByteCallback() → TIM6 gap timer
  *   TIM6 ISR      → Modbus_FrameTimeoutCallback()
  *   main loop     → Modbus_Process() → MBReg_WriteHolding() → Waveform_*()
- *   TIM2 TRGO     → DAC conversion trigger → DMA1_Stream5 → DAC output
- *                   (hardware-driven circular sweep; no per-step ISR)
+ *   TIM2 TRGO     → DAC conversion trigger → DMA1 Stream5/6 → selected DAC
+ *                   channel (hardware-driven circular sweep; no per-step ISR)
+ *   B1 button     → main-loop toggle of the same Output Enable register state
  * ============================================================ */
 
     /* Initialise modules */
@@ -63,7 +64,7 @@
  * USER CODE BEGIN WHILE   (inside the while(1) main loop)
  * ============================================================ */
 
-        /* Process any complete Modbus frame received since last iteration */
+        /* Process Modbus frames and queued B1 output-enable toggles. */
         Modbus_Process();
 
 /* ============================================================ */

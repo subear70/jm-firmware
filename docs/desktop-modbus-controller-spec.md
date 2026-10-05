@@ -143,12 +143,13 @@ The UI is a single resizable window built entirely in code (no `.Designer.cs`).
 └─────────────────────────────────────────────┘
 ```
 
-- **26 register boxes** cover the 24 contiguous registers `0x0000`–`0x0017`,
-  Sweep Pause at `0x0019`, and Triangle Mode at `0x001A`.
+- **27 register boxes** cover the 24 contiguous registers `0x0000`–`0x0017`,
+  Sweep Pause at `0x0019`, Triangle Mode at `0x001A`, and DAC Output Channel at `0x001B`.
 - **Baud rates** offered: 9600, 19200, 38400, 57600, 115200 (default 115200).
 - **Address** selector: 1–247. **New Device ID**: 1–247.
 - **Sweep Pause**: register-list entry at `0x0019`, 0–10,000 µs.
 - **Triangle Mode**: register-list entry at `0x001A`, 0 = sawtooth, 1 = triangle.
+- **DAC Output Channel**: register-list entry at `0x001B`, 1 = DAC1 CH1/PA4, 2 = DAC1 CH2/PA5.
 
 ### 6.2 Actions
 
@@ -157,8 +158,8 @@ The UI is a single resizable window built entirely in code (no `.Designer.cs`).
 | `↻` Refresh | Re-enumerates COM ports via `SerialPort.GetPortNames()`. |
 | Connect | Creates a `ModbusClient` for the selected port/baud and opens it. |
 | Disconnect | Closes and disposes the client. |
-| Read All | FC03 reads holding registers `0x0000`–`0x0017` into the boxes and reads `0x0019` and `0x001A` individually. |
-| Write All | FC16 bulk-writes registers `0x0000`–`0x0017`, then FC06 writes `0x0019` and `0x001A` individually. |
+| Read All | FC03 reads holding registers `0x0000`–`0x0017` into the boxes and reads `0x0019`, `0x001A`, and `0x001B` individually. |
+| Write All | FC16 bulk-writes registers `0x0000`–`0x0017`, then FC06 writes `0x0019`, `0x001A`, and `0x001B` individually. |
 | Set ID | FC06 write to `0x0018` on a background `Task`; updates the target address on success. |
 | Save Device Settings | Writes current register-list values to CSV (excludes Output Enable). |
 | Open Device Settings | Loads CSV values into register-list entries (matched by address); does not write to device. |

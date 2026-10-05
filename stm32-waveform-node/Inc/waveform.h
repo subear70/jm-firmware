@@ -108,6 +108,9 @@ void Waveform_SetCalibrationData(const CalibrationPoint_t *points,
  */
 void Waveform_Start(void);
 
+/** Select DAC output channel 1 (PA4) or 2 (PA5); restarts an active sweep. */
+void Waveform_SetDacChannel(uint8_t dac_channel);
+
 /**
  * @brief  Stop the sweep and drive the DAC output to 0 V.
  */

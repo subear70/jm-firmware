@@ -5,9 +5,10 @@
 `stm32-waveform-node` is the firmware for a **Modbus RTU slave** that drives a
 voltage-controlled oscillator (VCO) "jammer" stage. It receives frequency-sweep
 parameters and a frequency→voltage calibration table over RS485 Modbus RTU, then
-generates a hardware-timed sawtooth **frequency sweep** by streaming DAC samples
-via DMA. All configuration (sweep range, sweep rate, calibration, and the node's
-own Modbus address) persists in Flash-emulated EEPROM across power cycles.
+generates hardware-timed sawtooth/triangle **frequency sweeps** by streaming DAC
+samples via DMA. Modbus selects DAC1 channel 1 or 2 for the sweep output. The
+sweep range, sweep rate, calibration, and Modbus address are persisted in
+Flash-emulated EEPROM across power cycles.
 
 ## 2. Target hardware
 
@@ -15,7 +16,8 @@ own Modbus address) persists in Flash-emulated EEPROM across power cycles.
 |------|--------|
 | Board | Nucleo-64 STM32F446RE |
 | MCU | STM32F446RET6 — ARM Cortex-M4F @ 180 MHz, 512 KB Flash, 128 KB SRAM |
-| Analog output | DAC1 Channel 1 → **PA4** (to VCO tuning input) |
+| Analog output | DAC1 Channel 1 → **PA4**; channel 2 → **PA5** (selected by Modbus) |
+| User button | **PC13** (B1, falling-edge EXTI; toggles Output Enable) |
 | RS485 (production) | Transceiver on USART1 (PA9/PA10), DE/RE on **PA1** |
 | VCP (debug) | USART2 (PA2/PA3) via onboard ST-Link |
 | Status LED | LD2 on **PA5** (3× startup blink) |
@@ -28,10 +30,12 @@ own Modbus address) persists in Flash-emulated EEPROM across power cycles.
 | USART1 | PA9 (TX), PA10 (RX) | Modbus link in **RS485 mode** (`VCP_MODE = 0`) |
 | GPIO PA1 | — | RS485 DE/RE direction (HIGH = transmit) |
 | DAC1 CH1 | PA4 | Analog sweep voltage output |
+| DAC1 CH2 | PA5 | Alternate sweep output; LD2 is unavailable while selected |
 | TIM2 | internal | DAC sample trigger (TRGO), sets sweep rate |
 | TIM6 | internal | Modbus 3.5-char inter-frame gap timer |
 | DMA1 Stream5 | internal | Circular DAC sample streaming |
-| GPIO PA5 | — | Onboard LED (startup indicator) |
+| GPIO PA5 | — | LD2 when DAC1 CH1 is selected; DAC1 CH2 output otherwise |
+| GPIO PC13 | — | Onboard B1 user button (output toggle) |
 
 ## 3. Toolchain & build
 
@@ -91,7 +95,7 @@ flowchart TD
     REGW --> WF["Waveform_*()"]
     REGW --> EEP["EEPROM_SaveConfig()"]
     PROC -->|end of frame| COMMIT["MBReg_CommitIfDirty()"]
-    WF -->|TIM2 TRGO| DMA["DMA1_Stream5 → DAC1 CH1 (PA4)"]
+    WF -->|TIM2 TRGO| DMA["DMA1 Stream5/6 → selected DAC1 channel"]
     TX -->|DE/RE low| BUS(("RS485 bus"))
 ```
 
@@ -101,7 +105,7 @@ flowchart TD
 |--------|----------------|
 | `modbus_rtu` | RTU slave core: single-byte interrupt RX, inter-frame gap detection, CRC16, address/broadcast filtering, FC03/04/06/16 dispatch, exception responses, RS485 DE/RE control. |
 | `modbus_registers` | Register map: read/write callbacks, staging of values, side-effect application to the waveform module, dirty-flag persistence, device-address management. |
-| `waveform` | DAC-DMA sweep engine: builds sawtooth or triangle sample buffers, sets TIM2 rate, interpolates the calibration table, start/stop, live freq/voltage readback. |
+| `waveform` | DAC-DMA sweep engine; builds sweep buffers for the selected DAC channel, interpolates calibration, and reports live voltage. |
 | `eeprom` | Flash Sector 7 emulated EEPROM: packed 52-byte block with magic, erase-then-program save, direct memory-mapped load. |
 
 ## 6. Modbus RTU slave (`modbus_rtu.c`)
@@ -150,8 +154,9 @@ Broadcast writes execute the register side-effects but suppress the response.
 ## 7. Register handlers (`modbus_registers.c`)
 
 Staging variables hold the working configuration:
-`s_min_freq_hz`, `s_max_freq_hz`, `s_output_en`, `s_sweep_rate_hz`,
-`s_sweep_pause_us`, `s_triangle_enabled`, `s_device_addr`, and `s_cal_regs[20]`.
+`s_min_freq_hz`, `s_max_freq_hz`, `s_output_en`, `s_dac_channel`,
+`s_sweep_rate_hz`, `s_sweep_pause_us`,
+`s_triangle_enabled`, `s_device_addr`, and `s_cal_regs[20]`.
 
 ### 7.1 Write side-effects
 
@@ -159,12 +164,13 @@ Staging variables hold the working configuration:
 |----------|----------|
 | `0x0000` Min Freq | Update staging, re-apply sweep params, mark persist dirty. No range check. |
 | `0x0001` Max Freq | Update staging, re-apply sweep params, mark persist dirty. No range check. |
-| `0x0002` Output Enable | Start (`Waveform_Start`) or stop (`Waveform_Stop`) immediately. Not persisted. |
+| `0x0002` Output Enable | Start selected output or stop (`Waveform_Stop`) immediately. Modbus writes and B1 use the same volatile state. |
 | `0x0003` Sweep Rate (kHz) | Convert kHz→Hz; reject out-of-range (`1–500 kHz` → `1k–500k Hz`) with exception `0x03`; apply live; mark persist dirty. |
 | `0x0004`–`0x0017` Calibration | Stage value; mark cal + persist dirty (applied at end of frame). |
 | `0x0018` Device Address | Range-check 1–247 (else `0x03`); update address; **persist immediately**. |
 | `0x0019` Sweep Pause | Accept 0–10,000 us (else `0x03`); return to and hold the calibrated low DAC endpoint between sweeps; persist at end of frame. |
 | `0x001A` Triangle Mode | Accept 0 or 1 (else `0x03`); rebuild DMA live for sawtooth or triangle output; persist at end of frame. |
+| `0x001B` DAC Output Channel | Accept 1 (DAC1 CH1/PA4) or 2 (DAC1 CH2/PA5), else `0x03`; restarts an active sweep on the selected channel. Volatile; defaults to channel 1 after reboot. |
 
 ### 7.2 End-of-frame commit
 
@@ -197,14 +203,15 @@ single Flash sector erase/program.
 | `0x0001` Current Freq | `Waveform_GetCurrentFrequency_Hz()` |
 | `0x0002` Current Voltage | `Waveform_GetCurrentVoltage_mV()` |
 
+
 ## 8. Waveform engine (`waveform.c`)
 
 ### 8.1 Concept
 
-The node outputs either a **sawtooth** or **triangle frequency sweep**, selected
-by holding register `0x001A`. Both modes use calibrated DAC points; triangle mode
-mirrors the ramp back down to the minimum before any configured pause. A
-precomputed DAC sample buffer is streamed by **circular DMA**.
+The node outputs a **sawtooth** or **triangle frequency sweep**, selected by
+holding register `0x001A`. Holding register `0x001B` selects DAC1 channel 1
+(PA4) or channel 2 (PA5) for the sweep. Sweep samples use circular DMA on the
+matching stream; PA5's LD2 function is unavailable while channel 2 is selected.
 
 ```mermaid
 flowchart LR

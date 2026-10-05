@@ -21,6 +21,7 @@
 static uint16_t s_min_freq_hz  = WAVEFORM_DEFAULT_MIN_FREQ_HZ;
 static uint16_t s_max_freq_hz  = WAVEFORM_DEFAULT_MAX_FREQ_HZ;
 static uint16_t s_output_en    = 0U;
+static uint16_t s_dac_channel  = 1U;
 
 /* Active sweep-ramp rate (excluding the inter-sweep pause), stored internally in
  * Hz.  Configured via REG_SWEEP_RATE_KHZ (0x0003) in kHz units; applied live,
@@ -110,6 +111,10 @@ static void load_default_calibration(void)
 
 void MBReg_Init(void)
 {
+    s_output_en = 0U;
+    s_dac_channel = 1U;
+    Waveform_SetDacChannel((uint8_t)s_dac_channel);
+
     uint16_t           min_f    = WAVEFORM_DEFAULT_MIN_FREQ_HZ;
     uint16_t           max_f    = WAVEFORM_DEFAULT_MAX_FREQ_HZ;
     uint32_t           rate     = WAVEFORM_DEFAULT_SWEEP_RATE_HZ;
@@ -175,6 +180,15 @@ uint8_t MBReg_GetDeviceAddress(void)
     return s_device_addr;
 }
 
+void MBReg_ToggleOutputEnable(void)
+{
+    s_output_en = (s_output_en == 0U) ? 1U : 0U;
+    if (s_output_en)
+        Waveform_Start();
+    else
+        Waveform_Stop();
+}
+
 uint8_t MBReg_ReadHolding(uint16_t addr, uint16_t *value)
 {
     if (addr == REG_MIN_FREQ_HZ)
@@ -208,6 +222,10 @@ uint8_t MBReg_ReadHolding(uint16_t addr, uint16_t *value)
     else if (addr == REG_DEVICE_ADDRESS)
     {
         *value = s_device_addr;
+    }
+    else if (addr == REG_DAC_CHANNEL)
+    {
+        *value = s_dac_channel;
     }
     else
     {
@@ -288,6 +306,13 @@ uint8_t MBReg_WriteHolding(uint16_t addr, uint16_t value)
          * must target the new address. */
         if (persist_config() != EEPROM_OK)
             return MB_EX_ILLEGAL_VALUE;
+    }
+    else if (addr == REG_DAC_CHANNEL)
+    {
+        if (value < 1U || value > 2U)
+            return MB_EX_ILLEGAL_VALUE;
+        s_dac_channel = value;
+        Waveform_SetDacChannel((uint8_t)value);
     }
     else
     {

@@ -22,8 +22,8 @@ namespace DesktopModbusController.Forms
     /// </summary>
     public sealed class MainForm : Form
     {
-        // The first 24 holding registers are contiguous. 0x0019 and 0x001A
-        // are read/written separately because 0x0018 is the device address.
+        // The first 24 holding registers are contiguous. Registers from 0x0019
+        // onward are read/written separately because 0x0018 is the device address.
         private static readonly (ushort Address, string Name)[] RegisterDefs =
         {
             (0x0000, "Min Frequency (MHz)"),
@@ -52,6 +52,7 @@ namespace DesktopModbusController.Forms
             (0x0017, "Cal 10 Voltage (mV)"),
             (ModbusRegisters.SweepPauseUs, "Sweep Pause (us)"),
             (ModbusRegisters.WaveformTriangle, "Triangle Wave (0/1)"),
+            (ModbusRegisters.DacOutputChannel, "DAC Output Channel (1=PA4, 2=PA5)"),
         };
 
         private const int ContiguousHoldingRegisterCount = 24;
@@ -336,9 +337,7 @@ namespace DesktopModbusController.Forms
                 }
                 if (!IsRegisterValueValid(RegisterDefs[i].Address, values[i]))
                 {
-                    string allowed = RegisterDefs[i].Address == ModbusRegisters.SweepPauseUs
-                        ? $"0–{ModbusRegisters.MaxSweepPauseUs} us"
-                        : "0 or 1";
+                    string allowed = GetRegisterValueRange(RegisterDefs[i].Address);
                     ShowError($"{RegisterDefs[i].Name} must be {allowed}.");
                     _regBoxes[i].Focus();
                     _regBoxes[i].SelectAll();
@@ -521,9 +520,21 @@ namespace DesktopModbusController.Forms
         {
             if (address == ModbusRegisters.SweepPauseUs)
                 return value <= ModbusRegisters.MaxSweepPauseUs;
-            if (address == ModbusRegisters.WaveformTriangle)
+            if (address == ModbusRegisters.DacOutputChannel)
+                return value == 1U || value == 2U;
+            if (address == ModbusRegisters.OutputEnable ||
+                address == ModbusRegisters.WaveformTriangle)
                 return value <= 1U;
             return true;
+        }
+
+        private static string GetRegisterValueRange(ushort address)
+        {
+            if (address == ModbusRegisters.SweepPauseUs)
+                return $"0–{ModbusRegisters.MaxSweepPauseUs} us";
+            if (address == ModbusRegisters.DacOutputChannel)
+                return "1 or 2";
+            return "0 or 1";
         }
 
         // ── Helpers ────────────────────────────────────────────────────────────────

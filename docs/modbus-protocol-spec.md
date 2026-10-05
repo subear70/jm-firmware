@@ -106,7 +106,7 @@ addr | (fc | 0x80) | exceptionCode | crcLo | crcHi
 |------|---------|-------------|
 | `0x01` | Illegal function | Unsupported function code |
 | `0x02` | Illegal data address | Register address outside the map |
-| `0x03` | Illegal data value | Bad count, malformed frame, or out-of-range value (sweep rate, device address) |
+| `0x03` | Illegal data value | Bad count, malformed frame, or out-of-range value (sweep rate, device address, DAC output channel) |
 
 The master (`ModbusClient.ReadResponse`) reads the 2-byte header first and
 detects the error bit (`fc | 0x80`) so a short exception frame is not mistaken
@@ -130,12 +130,13 @@ for a timeout. Bad-CRC frames are validated before the exception is surfaced.
 |---------------|------|------|------|-------|-----|-------|
 | `0x0000` | Min Frequency | uint16 | Hz | any uint16 | R/W | Sweep start frequency. No range/order validation in firmware. |
 | `0x0001` | Max Frequency | uint16 | Hz | any uint16 | R/W | Sweep end frequency. No range/order validation in firmware. |
-| `0x0002` | Output Enable | uint16 | — | 0 / 1 | R/W | 0 = stop (DAC to 0 V), non-zero = start. Volatile (not persisted). |
+| `0x0002` | Output Enable | uint16 | — | 0 / 1 | R/W | 0 = stop (DAC to 0 V), 1 = start. Volatile; Modbus writes and the onboard B1 button both update this state. |
 | `0x0003` | Sweep Rate | uint16 | kHz | 1 – 500 sawtooth; 1 – 333 triangle | R/W | Active ramp rate, excluding pause. Applied live; auto-persisted. Triangle mode is capped to keep the DAC sample rate at or below 1 MSPS. |
 | `0x0004`–`0x0017` | Calibration block | uint16 ×20 | Hz / mV | — | R/W | 10 pairs `[freq0, volt0, … freq9, volt9]`. Applied + persisted at end of frame. |
 | `0x0018` | Device Address | uint16 | — | 1 – 247 | R/W | Persisted Modbus address. Written via FC06; response comes from the old address, then the node answers on the new one. Out-of-range → `0x03`. |
 | `0x0019` | Sweep Pause | uint16 | us | 0 – 10,000 | R/W | Fly back to and hold the calibrated low DAC endpoint between sweeps. Applied live and persisted; rounds up to the next DAC sample interval. Out-of-range → `0x03`. |
 | `0x001A` | Triangle Mode | uint16 (bool) | — | 0 / 1 | R/W | 0 = sawtooth; 1 = triangle. Applied live and persisted. Other values → `0x03`. |
+| `0x001B` | DAC Output Channel | uint16 | — | 1 / 2 | R/W | 1 = DAC1 CH1 (PA4); 2 = DAC1 CH2 (PA5). Applies live to the active sweep; volatile and defaults to channel 1 after reboot. Channel 2 uses the onboard LED pin. Other values → `0x03`. |
 
 > **Unit note:** The firmware treats Min/Max frequency internally in Hz. The
 > desktop UI labels them "MHz" (see the UI spec) — the raw uint16 register value
@@ -188,6 +189,7 @@ to the table endpoints.
 | Calibration block | Yes | End of frame (coalesced) |
 | Sweep Pause | Yes | End of frame (coalesced) |
 | Triangle Mode | Yes | End of frame (coalesced) |
+| DAC Output Channel | No | Runtime only |
 | Device Address | Yes | **Immediately** within the write handler |
 | Output Enable | No | Volatile runtime state only |
 

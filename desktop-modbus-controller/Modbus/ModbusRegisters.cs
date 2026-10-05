@@ -42,6 +42,9 @@ namespace DesktopModbusController.Modbus
         /// <summary>Waveform mode: 0 = sawtooth, 1 = triangle. R/W and persisted.</summary>
         public const ushort WaveformTriangle = 0x001A;
 
+        /// <summary>DAC output channel: 1 = DAC1 CH1/PA4, 2 = DAC1 CH2/PA5. R/W, volatile.</summary>
+        public const ushort DacOutputChannel = 0x001B;
+
         // ── Input registers (FC04) ────────────────────────────────────────────
         /// <summary>Device status bit-flags. R only.</summary>
         public const ushort DeviceStatus      = 0x0000;
