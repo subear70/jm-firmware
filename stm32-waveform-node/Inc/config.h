@@ -30,6 +30,10 @@
 #define WAVEFORM_DEFAULT_MIN_FREQ_HZ  ((uint16_t)1U)
 #define WAVEFORM_DEFAULT_MAX_FREQ_HZ  ((uint16_t)10U)
 
+/* Set to 1 to start waveform generation automatically at power-on, or 0 to
+ * leave output disabled until enabled through Modbus or the onboard button. */
+#define WAVEFORM_START_ON_BOOT        1U
+
 /* Dynamic DAC sample count per sweep ramp.
  * The number of DAC samples used for each sweep is chosen at runtime from the
  * sweep rate so the DAC sample rate never exceeds DAC_MAX_SAMPLE_RATE_HZ:

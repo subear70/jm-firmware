@@ -46,6 +46,15 @@ static uint8_t s_cal_dirty     = 0U;  /* calibration table needs re-applying */
  * Helpers
  * -------------------------------------------------------------------------- */
 
+static void set_output_enable(uint8_t enabled)
+{
+    s_output_en = (enabled != 0U) ? 1U : 0U;
+    if (s_output_en)
+        Waveform_Start();
+    else
+        Waveform_Stop();
+}
+
 /** Push the current staging values into the waveform module. */
 static void apply_sweep_params(void)
 {
@@ -137,6 +146,7 @@ void MBReg_Init(void)
         Waveform_SetSweepRate(s_sweep_rate_hz);
         Waveform_SetPauseUs(s_sweep_pause_us);
         Waveform_SetTriangleEnabled(s_triangle_enabled);
+        set_output_enable(WAVEFORM_START_ON_BOOT);
         (void)persist_config();
         return;
     }
@@ -172,7 +182,7 @@ void MBReg_Init(void)
     Waveform_SetSweepRate(rate);
     s_sweep_rate_hz = Waveform_GetSweepRate_Hz();
     Waveform_SetPauseUs(pause_us);
-    /* Output stays disabled until master sends Output Enable command */
+    set_output_enable(WAVEFORM_START_ON_BOOT);
 }
 
 uint8_t MBReg_GetDeviceAddress(void)
@@ -182,11 +192,7 @@ uint8_t MBReg_GetDeviceAddress(void)
 
 void MBReg_ToggleOutputEnable(void)
 {
-    s_output_en = (s_output_en == 0U) ? 1U : 0U;
-    if (s_output_en)
-        Waveform_Start();
-    else
-        Waveform_Stop();
+    set_output_enable(s_output_en == 0U);
 }
 
 uint8_t MBReg_ReadHolding(uint16_t addr, uint16_t *value)
@@ -252,11 +258,7 @@ uint8_t MBReg_WriteHolding(uint16_t addr, uint16_t value)
     }
     else if (addr == REG_OUTPUT_ENABLE)
     {
-        s_output_en = (value != 0U) ? 1U : 0U;
-        if (s_output_en)
-            Waveform_Start();
-        else
-            Waveform_Stop();
+        set_output_enable((uint8_t)value);
     }
     else if (addr == REG_SWEEP_RATE_KHZ)
     {
